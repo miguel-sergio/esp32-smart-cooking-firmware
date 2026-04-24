@@ -32,7 +32,12 @@ esp_err_t test_bme280_run(i2c_master_bus_handle_t bus) {
     /* Discard first sample — sensor output may be unstable immediately
      * after entering normal mode (internal filter not yet settled). */
     bme280_data_t discard;
-    bme280_read(dev, &discard);
+    ret = bme280_read(dev, &discard);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "discard read failed: %s", esp_err_to_name(ret));
+        bme280_deinit(dev);
+        return ret;
+    }
     vTaskDelay(pdMS_TO_TICKS(500));
 
     for (int i = 0; i < SAMPLE_COUNT; i++) {
