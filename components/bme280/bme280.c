@@ -124,6 +124,8 @@ static uint32_t comp_humidity(const calib_t *c, int32_t adc, int32_t t_fine) {
  * Public API
  * -------------------------------------------------------------------------- */
 esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t **out_dev) {
+    ESP_RETURN_ON_FALSE(bus && out_dev, ESP_ERR_INVALID_ARG, TAG, "Invalid argument");
+
     esp_err_t ret;
 
     ESP_RETURN_ON_FALSE(out_dev, ESP_ERR_INVALID_ARG, TAG, "out_dev must not be NULL");
@@ -186,6 +188,8 @@ err_free:
 }
 
 esp_err_t bme280_read(bme280_dev_t *dev, bme280_data_t *out) {
+    ESP_RETURN_ON_FALSE(dev && out, ESP_ERR_INVALID_ARG, TAG, "Invalid argument");
+
     uint8_t raw[8];
     ESP_RETURN_ON_ERROR(reg_read(dev, REG_DATA, raw, sizeof(raw)), TAG, "read data failed");
 
