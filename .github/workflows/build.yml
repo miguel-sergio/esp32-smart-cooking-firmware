@@ -1,0 +1,24 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: idf.py build (ESP32)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build firmware
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py build
