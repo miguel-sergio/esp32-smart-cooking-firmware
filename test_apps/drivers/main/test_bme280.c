@@ -1,5 +1,7 @@
 #include "test_bme280.h"
 
+#include <stdbool.h>
+
 #include "bme280.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
