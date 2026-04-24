@@ -126,6 +126,8 @@ static uint32_t comp_humidity(const calib_t *c, int32_t adc, int32_t t_fine) {
 esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t **out_dev) {
     esp_err_t ret;
 
+    ESP_RETURN_ON_FALSE(out_dev, ESP_ERR_INVALID_ARG, TAG, "out_dev must not be NULL");
+    *out_dev = NULL;
     bme280_dev_t *dev = calloc(1, sizeof(*dev));
     ESP_RETURN_ON_FALSE(dev, ESP_ERR_NO_MEM, TAG, "heap alloc failed");
 
