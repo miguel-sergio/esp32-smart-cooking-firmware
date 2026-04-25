@@ -117,7 +117,7 @@ esp_err_t drv8833_ramp_to_speed(drv8833_dev_t *dev, drv8833_channel_t ch,
  *
  * @param  dev  Pointer to an initialised drv8833_dev_t.
  * @param  ch   DRV8833_CHANNEL_A or DRV8833_CHANNEL_B.
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if dev is NULL.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if dev is NULL or ch is invalid.
  */
 esp_err_t drv8833_brake(drv8833_dev_t *dev, drv8833_channel_t ch);
 

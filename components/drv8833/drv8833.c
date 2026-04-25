@@ -108,6 +108,8 @@ esp_err_t drv8833_init(const drv8833_config_t *cfg, drv8833_dev_t *dev) {
 
 esp_err_t drv8833_set_speed(drv8833_dev_t *dev, drv8833_channel_t ch, int8_t speed_pct) {
     ESP_RETURN_ON_FALSE(dev, ESP_ERR_INVALID_ARG, TAG, "dev is NULL");
+    ESP_RETURN_ON_FALSE(ch == DRV8833_CHANNEL_A || ch == DRV8833_CHANNEL_B,
+                        ESP_ERR_INVALID_ARG, TAG, "ch is invalid");
     ESP_RETURN_ON_FALSE(speed_pct >= -100 && speed_pct <= 100,
                         ESP_ERR_INVALID_ARG, TAG, "speed_pct out of range [-100, 100]");
 
@@ -133,6 +135,8 @@ esp_err_t drv8833_set_speed(drv8833_dev_t *dev, drv8833_channel_t ch, int8_t spe
 esp_err_t drv8833_ramp_to_speed(drv8833_dev_t *dev, drv8833_channel_t ch,
                                  int8_t target_pct, uint32_t ramp_ms) {
     ESP_RETURN_ON_FALSE(dev, ESP_ERR_INVALID_ARG, TAG, "dev is NULL");
+    ESP_RETURN_ON_FALSE(ch == DRV8833_CHANNEL_A || ch == DRV8833_CHANNEL_B,
+                        ESP_ERR_INVALID_ARG, TAG, "ch is invalid");
     ESP_RETURN_ON_FALSE(target_pct >= -100 && target_pct <= 100,
                         ESP_ERR_INVALID_ARG, TAG, "target_pct out of range [-100, 100]");
 
@@ -160,6 +164,8 @@ esp_err_t drv8833_ramp_to_speed(drv8833_dev_t *dev, drv8833_channel_t ch,
 
 esp_err_t drv8833_brake(drv8833_dev_t *dev, drv8833_channel_t ch) {
     ESP_RETURN_ON_FALSE(dev, ESP_ERR_INVALID_ARG, TAG, "dev is NULL");
+    ESP_RETURN_ON_FALSE(ch == DRV8833_CHANNEL_A || ch == DRV8833_CHANNEL_B,
+                        ESP_ERR_INVALID_ARG, TAG, "ch is invalid");
 
     ledc_channel_t in1 = (ch == DRV8833_CHANNEL_A) ? dev->ain1_ch : dev->bin1_ch;
     ledc_channel_t in2 = (ch == DRV8833_CHANNEL_A) ? dev->ain2_ch : dev->bin2_ch;
