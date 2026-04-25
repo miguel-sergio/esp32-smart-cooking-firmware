@@ -22,7 +22,7 @@ static const char *TAG = "test_bme280";
 esp_err_t test_bme280_run(i2c_master_bus_handle_t bus) {
     ESP_LOGI(TAG, "--- BME280 validation START ---");
 
-    static bme280_dev_t dev;
+    bme280_dev_t dev = {0};
     esp_err_t ret = bme280_init(bus, BME280_I2C_ADDR_DEFAULT, &dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "init failed: %s", esp_err_to_name(ret));
