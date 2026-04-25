@@ -5,6 +5,8 @@
 
 /* --- I2C drivers --- */
 #include "test_bme280.h"
+/* --- PWM / GPIO drivers --- */
+#include "test_drv8833.h"
 
 static const char *TAG = "drv-validation";
 
@@ -46,6 +48,11 @@ void app_main(void) {
     RUN_TEST("bme280", test_bme280_run(i2c_bus));
 
     i2c_del_master_bus(i2c_bus);
+
+    /* ------------------------------------------------------------------ *
+     * PWM / GPIO tests — standalone, no shared bus                       *
+     * ------------------------------------------------------------------ */
+    RUN_TEST("drv8833", test_drv8833_run());
 
     /* ------------------------------------------------------------------ *
      * Summary                                                             *
