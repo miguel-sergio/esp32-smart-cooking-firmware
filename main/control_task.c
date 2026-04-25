@@ -269,6 +269,9 @@ static void control_task(void *arg) {
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 void control_task_start(const control_task_config_t *cfg) {
+    configASSERT(cfg != NULL);
+    configASSERT(cfg->temp_q != NULL);
+    configASSERT(cfg->cmd_q != NULL);
     s_cfg = *cfg;
 
     BaseType_t ret = xTaskCreatePinnedToCore(
