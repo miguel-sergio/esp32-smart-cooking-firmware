@@ -89,7 +89,8 @@ esp_err_t drv8833_init(const drv8833_config_t *cfg, drv8833_dev_t *dev);
  * @param  ch        DRV8833_CHANNEL_A or DRV8833_CHANNEL_B.
  * @param  speed_pct Speed in the range [-100, 100].
  *                   Positive = forward, negative = reverse, 0 = coast.
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if dev is NULL or speed is out of range.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if dev is NULL, ch is invalid,
+ *         or speed is out of range.
  */
 esp_err_t drv8833_set_speed(drv8833_dev_t *dev, drv8833_channel_t ch, int8_t speed_pct);
 
