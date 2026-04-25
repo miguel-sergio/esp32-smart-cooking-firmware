@@ -32,6 +32,7 @@ static drv8833_dev_t s_motor;
  * Motor is started once at init and runs independently of this task.
  * ----------------------------------------------------------------------- */
 static void sensor_task(void *arg) {
+    (void)arg;
     bme280_data_t data;
 
     while (1) {
