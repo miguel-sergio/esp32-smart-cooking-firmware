@@ -22,7 +22,7 @@ static const char *TAG = "test_bme280";
 esp_err_t test_bme280_run(i2c_master_bus_handle_t bus) {
     ESP_LOGI(TAG, "--- BME280 validation START ---");
 
-    bme280_dev_t *dev = NULL;
+    static bme280_dev_t dev;
     esp_err_t ret = bme280_init(bus, BME280_I2C_ADDR_DEFAULT, &dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "init failed: %s", esp_err_to_name(ret));
@@ -34,17 +34,17 @@ esp_err_t test_bme280_run(i2c_master_bus_handle_t bus) {
     /* Discard first sample — sensor output may be unstable immediately
      * after entering normal mode (internal filter not yet settled). */
     bme280_data_t discard;
-    ret = bme280_read(dev, &discard);
+    ret = bme280_read(&dev, &discard);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "discard read failed: %s", esp_err_to_name(ret));
-        bme280_deinit(dev);
+        bme280_deinit(&dev);
         return ret;
     }
     vTaskDelay(pdMS_TO_TICKS(500));
 
     for (int i = 0; i < SAMPLE_COUNT; i++) {
         bme280_data_t d;
-        ret = bme280_read(dev, &d);
+        ret = bme280_read(&dev, &d);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "[%d] read failed: %s", i, esp_err_to_name(ret));
             result = ret;
@@ -66,7 +66,7 @@ esp_err_t test_bme280_run(i2c_master_bus_handle_t bus) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    bme280_deinit(dev);
+    bme280_deinit(&dev);
 
     if (result == ESP_OK) {
         ESP_LOGI(TAG, "--- BME280 validation PASS ---");

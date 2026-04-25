@@ -1,6 +1,5 @@
 #include "bme280.h"
 
-#include <stdlib.h>
 #include "esp_log.h"
 #include "esp_check.h"
 #include "freertos/FreeRTOS.h"
@@ -25,22 +24,6 @@ static const char *TAG = "bme280";
 #define I2C_TIMEOUT_MS  (-1)  /* block until done */
 
 /* --------------------------------------------------------------------------
- * Internal types
- * -------------------------------------------------------------------------- */
-typedef struct {
-    uint16_t T1; int16_t T2; int16_t T3;
-    uint16_t P1; int16_t P2; int16_t P3; int16_t P4;
-    int16_t  P5; int16_t P6; int16_t P7; int16_t P8; int16_t P9;
-    uint8_t  H1; int16_t H2; uint8_t  H3;
-    int16_t  H4; int16_t H5; int8_t   H6;
-} calib_t;
-
-struct bme280_dev {
-    i2c_master_dev_handle_t i2c_dev;
-    calib_t                 calib;
-};
-
-/* --------------------------------------------------------------------------
  * I2C helpers
  * -------------------------------------------------------------------------- */
 static esp_err_t reg_write(bme280_dev_t *dev, uint8_t reg, uint8_t val) {
@@ -59,7 +42,7 @@ static esp_err_t reg_read(bme280_dev_t *dev, uint8_t reg, uint8_t *dst, size_t l
 #define LE16U(b, i)  ((uint16_t)((uint8_t)(b)[(i)+1] << 8 | (uint8_t)(b)[i]))
 #define LE16S(b, i)  ((int16_t) LE16U(b, i))
 
-static void load_calib(calib_t *c, const uint8_t *b1, const uint8_t *b2) {
+static void load_calib(bme280_calib_t *c, const uint8_t *b1, const uint8_t *b2) {
     c->T1 = LE16U(b1,  0); c->T2 = LE16S(b1,  2); c->T3 = LE16S(b1,  4);
     c->P1 = LE16U(b1,  6); c->P2 = LE16S(b1,  8); c->P3 = LE16S(b1, 10);
     c->P4 = LE16S(b1, 12); c->P5 = LE16S(b1, 14); c->P6 = LE16S(b1, 16);
@@ -83,7 +66,7 @@ static void load_calib(calib_t *c, const uint8_t *b1, const uint8_t *b2) {
  * -------------------------------------------------------------------------- */
 
 /* Returns temperature in units of 0.01 °C; sets t_fine used by P and H. */
-static int32_t comp_temp(const calib_t *c, int32_t adc, int32_t *t_fine) {
+static int32_t comp_temp(const bme280_calib_t *c, int32_t adc, int32_t *t_fine) {
     int32_t v1 = ((((adc >> 3) - ((int32_t)c->T1 << 1))) * c->T2) >> 11;
     int32_t v2 = (((((adc >> 4) - (int32_t)c->T1) *
                     ((adc >> 4) - (int32_t)c->T1)) >> 12) * c->T3) >> 14;
@@ -92,7 +75,7 @@ static int32_t comp_temp(const calib_t *c, int32_t adc, int32_t *t_fine) {
 }
 
 /* Returns pressure in Q24.8 Pa (divide by 256 to get Pa, divide by 25600 for hPa). */
-static uint32_t comp_pressure(const calib_t *c, int32_t adc, int32_t t_fine) {
+static uint32_t comp_pressure(const bme280_calib_t *c, int32_t adc, int32_t t_fine) {
     int64_t v1 = (int64_t)t_fine - 128000;
     int64_t v2 = v1 * v1 * c->P6;
     v2 += (v1 * c->P5) << 17;
@@ -108,7 +91,7 @@ static uint32_t comp_pressure(const calib_t *c, int32_t adc, int32_t t_fine) {
 }
 
 /* Returns humidity in Q22.10 %RH (divide by 1024 to get %RH). */
-static uint32_t comp_humidity(const calib_t *c, int32_t adc, int32_t t_fine) {
+static uint32_t comp_humidity(const bme280_calib_t *c, int32_t adc, int32_t t_fine) {
     int32_t v = t_fine - 76800;
     v = (((adc << 14) - ((int32_t)c->H4 << 20) - (c->H5 * v) + 16384) >> 15)
         * (((((((v * c->H6) >> 10)
@@ -123,32 +106,18 @@ static uint32_t comp_humidity(const calib_t *c, int32_t adc, int32_t t_fine) {
 /* --------------------------------------------------------------------------
  * Public API
  * -------------------------------------------------------------------------- */
-esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t **out_dev) {
-    ESP_RETURN_ON_FALSE(bus && out_dev, ESP_ERR_INVALID_ARG, TAG, "Invalid argument");
 
-    esp_err_t ret;
-
-    ESP_RETURN_ON_FALSE(out_dev, ESP_ERR_INVALID_ARG, TAG, "out_dev must not be NULL");
-    *out_dev = NULL;
-    bme280_dev_t *dev = calloc(1, sizeof(*dev));
-    ESP_RETURN_ON_FALSE(dev, ESP_ERR_NO_MEM, TAG, "heap alloc failed");
-
-    i2c_device_config_t cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = addr,
-        .scl_speed_hz    = 400000,
-    };
-    ESP_GOTO_ON_ERROR(i2c_master_bus_add_device(bus, &cfg, &dev->i2c_dev),
-                      err_free, TAG, "i2c_master_bus_add_device failed");
-
+/* Configure the sensor after the I2C device handle has been added.
+ * All failures propagate upward; the caller owns cleanup of i2c_dev. */
+static esp_err_t bme280_configure(bme280_dev_t *dev) {
     uint8_t id;
-    ESP_GOTO_ON_ERROR(reg_read(dev, REG_ID, &id, 1),
-                      err_dev, TAG, "read chip-id failed");
-    ESP_GOTO_ON_FALSE(id == CHIP_ID, ESP_ERR_NOT_FOUND, err_dev,
-                      TAG, "unexpected chip-id 0x%02x (expected 0x%02x)", id, CHIP_ID);
+    ESP_RETURN_ON_ERROR(reg_read(dev, REG_ID, &id, 1),
+                        TAG, "read chip-id failed");
+    ESP_RETURN_ON_FALSE(id == CHIP_ID, ESP_ERR_NOT_FOUND,
+                        TAG, "unexpected chip-id 0x%02x (expected 0x%02x)", id, CHIP_ID);
 
-    ESP_GOTO_ON_ERROR(reg_write(dev, REG_RESET, RESET_VAL),
-                      err_dev, TAG, "soft reset failed");
+    ESP_RETURN_ON_ERROR(reg_write(dev, REG_RESET, RESET_VAL),
+                        TAG, "soft reset failed");
 
     /* Poll im_update (bit0 of status) until NVM data is fully loaded.
      * Fixed delay is unreliable; polling is the correct approach. */
@@ -156,35 +125,48 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t **
     int retries = 20;
     do {
         vTaskDelay(pdMS_TO_TICKS(2));
-        ESP_GOTO_ON_ERROR(reg_read(dev, REG_STATUS, &status, 1),
-                          err_dev, TAG, "read status failed");
+        ESP_RETURN_ON_ERROR(reg_read(dev, REG_STATUS, &status, 1),
+                            TAG, "read status failed");
     } while ((status & 0x01) && --retries);
-    ESP_GOTO_ON_FALSE(retries, ESP_ERR_TIMEOUT, err_dev,
-                      TAG, "NVM load timeout after reset");
+    ESP_RETURN_ON_FALSE(retries, ESP_ERR_TIMEOUT,
+                        TAG, "NVM load timeout after reset");
 
     uint8_t c1[26], c2[7];
-    ESP_GOTO_ON_ERROR(reg_read(dev, REG_CALIB1, c1, sizeof(c1)),
-                      err_dev, TAG, "read calib block 1 failed");
-    ESP_GOTO_ON_ERROR(reg_read(dev, REG_CALIB2, c2, sizeof(c2)),
-                      err_dev, TAG, "read calib block 2 failed");
+    ESP_RETURN_ON_ERROR(reg_read(dev, REG_CALIB1, c1, sizeof(c1)),
+                        TAG, "read calib block 1 failed");
+    ESP_RETURN_ON_ERROR(reg_read(dev, REG_CALIB2, c2, sizeof(c2)),
+                        TAG, "read calib block 2 failed");
     load_calib(&dev->calib, c1, c2);
 
     /* ctrl_hum changes only take effect after writing ctrl_meas (per datasheet) */
-    ESP_GOTO_ON_ERROR(reg_write(dev, REG_CTRL_HUM,  0x01), err_dev, TAG, "write ctrl_hum");
-    ESP_GOTO_ON_ERROR(reg_write(dev, REG_CTRL_MEAS, 0x27), err_dev, TAG, "write ctrl_meas");
+    ESP_RETURN_ON_ERROR(reg_write(dev, REG_CTRL_HUM,  0x01), TAG, "write ctrl_hum");
+    ESP_RETURN_ON_ERROR(reg_write(dev, REG_CTRL_MEAS, 0x27), TAG, "write ctrl_meas");
     /* 0x27 = osrs_t×1 | osrs_p×1 | mode=normal */
 
     /* Wait for the first measurement to complete (~10 ms at ×1 oversampling) */
     vTaskDelay(pdMS_TO_TICKS(15));
-
-    *out_dev = dev;
     return ESP_OK;
+}
 
-err_dev:
-    i2c_master_bus_rm_device(dev->i2c_dev);
-err_free:
-    free(dev);
-    return ret;
+esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t *dev) {
+    ESP_RETURN_ON_FALSE(bus, ESP_ERR_INVALID_ARG, TAG, "bus is NULL");
+    ESP_RETURN_ON_FALSE(dev, ESP_ERR_INVALID_ARG, TAG, "dev is NULL");
+
+    i2c_device_config_t cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = addr,
+        .scl_speed_hz    = 400000,
+    };
+    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(bus, &cfg, &dev->i2c_dev),
+                        TAG, "i2c_master_bus_add_device failed");
+
+    esp_err_t ret = bme280_configure(dev);
+    if (ret != ESP_OK) {
+        i2c_master_bus_rm_device(dev->i2c_dev);
+        return ret;
+    }
+
+    return ESP_OK;
 }
 
 esp_err_t bme280_read(bme280_dev_t *dev, bme280_data_t *out) {
@@ -211,5 +193,4 @@ esp_err_t bme280_read(bme280_dev_t *dev, bme280_data_t *out) {
 void bme280_deinit(bme280_dev_t *dev) {
     if (!dev) return;
     i2c_master_bus_rm_device(dev->i2c_dev);
-    free(dev);
 }
