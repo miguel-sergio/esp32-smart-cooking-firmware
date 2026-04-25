@@ -45,10 +45,16 @@ typedef struct {
  * Verifies the chip-ID, performs a soft reset, reads factory calibration data
  * and puts the sensor in normal mode (oversampling x1 for T, P, H).
  *
- * The caller is responsible for allocating the bme280_dev_t instance. Typical usage:
+ * The caller is responsible for allocating the bme280_dev_t instance. The struct
+ * does not need to be zero-initialised before calling this function; bme280_init()
+ * unconditionally writes all fields it uses. On failure, @p dev->i2c_dev is set to
+ * NULL so that bme280_deinit() is safe to call as part of a common cleanup path.
+ *
+ * Typical usage:
  * @code
- *   static bme280_dev_t sensor;
- *   ESP_ERROR_CHECK(bme280_init(bus, BME280_I2C_ADDR_DEFAULT, &sensor));
+ *   bme280_dev_t sensor;
+ *   esp_err_t err = bme280_init(bus, BME280_I2C_ADDR_DEFAULT, &sensor);
+ *   if (err != ESP_OK) { bme280_deinit(&sensor); return err; }
  * @endcode
  *
  * @param  bus  I2C master bus handle (created by the caller via i2c_new_master_bus()).
@@ -76,8 +82,10 @@ esp_err_t bme280_read(bme280_dev_t *dev, bme280_data_t *out);
  * @brief  Remove the device from the I2C bus.
  *
  * Does not free the bme280_dev_t — the caller owns the storage.
+ * Safe to call after a failed bme280_init() and idempotent (calling it
+ * more than once on the same instance is a no-op after the first call).
  *
- * @param  dev  Pointer to an initialised bme280_dev_t. No-op if NULL.
+ * @param  dev  Pointer to a bme280_dev_t. No-op if NULL or not yet initialised.
  */
 void bme280_deinit(bme280_dev_t *dev);
 

@@ -153,6 +153,8 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t *d
     ESP_RETURN_ON_FALSE(bus, ESP_ERR_INVALID_ARG, TAG, "bus is NULL");
     ESP_RETURN_ON_FALSE(dev, ESP_ERR_INVALID_ARG, TAG, "dev is NULL");
 
+    dev->i2c_dev = NULL;
+
     i2c_device_config_t cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = addr,
@@ -164,6 +166,7 @@ esp_err_t bme280_init(i2c_master_bus_handle_t bus, uint8_t addr, bme280_dev_t *d
     esp_err_t ret = bme280_configure(dev);
     if (ret != ESP_OK) {
         i2c_master_bus_rm_device(dev->i2c_dev);
+        dev->i2c_dev = NULL;
         return ret;
     }
 
@@ -192,6 +195,7 @@ esp_err_t bme280_read(bme280_dev_t *dev, bme280_data_t *out) {
 }
 
 void bme280_deinit(bme280_dev_t *dev) {
-    if (!dev) return;
+    if (!dev || !dev->i2c_dev) return;
     i2c_master_bus_rm_device(dev->i2c_dev);
+    dev->i2c_dev = NULL;
 }
