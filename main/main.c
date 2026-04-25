@@ -27,9 +27,9 @@ static const char *TAG = "poc";
 static bme280_dev_t  s_bme;
 static drv8833_dev_t s_motor;
 
-/* ── Sensor + motor task ─────────────────────────────────────────────────
+/* ── Sensor task ─────────────────────────────────────────────────────────
  * Reads BME280 at 1 Hz and logs T / H / P to UART.
- * Motor is started once at init; this task only monitors it.
+ * Motor is started once at init and runs independently of this task.
  * ----------------------------------------------------------------------- */
 static void sensor_task(void *arg) {
     bme280_data_t data;
