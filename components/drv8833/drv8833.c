@@ -148,7 +148,7 @@ esp_err_t drv8833_ramp_to_speed(drv8833_dev_t *dev, drv8833_channel_t ch,
     for (uint32_t step = 1; step <= steps; step++) {
         int8_t v = (int8_t)(start + diff * (int)step / (int)steps);
         ESP_RETURN_ON_ERROR(drv8833_set_speed(dev, ch, v),
-                            TAG, "ramp set_speed failed at step %"PRIu32, step);
+                            TAG, "ramp set_speed failed at step %lu", (unsigned long)step);
         if (step < steps) {
             vTaskDelay(pdMS_TO_TICKS(RAMP_STEP_MS));
         }
