@@ -100,9 +100,17 @@ static void send_motor_cmd(int8_t duty_pct, bool brake) {
     if (s_cfg.motor_q == NULL) {
         return;
     }
+
     motor_cmd_t cmd = { .duty_pct = duty_pct, .brake = brake };
-    if (xQueueSend(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "motor_q full — motor command dropped");
+    const bool critical_stop_cmd = brake || (duty_pct == 0);
+    const TickType_t send_ticks = critical_stop_cmd ? pdMS_TO_TICKS(20) : 0;
+
+    if (xQueueSend(s_cfg.motor_q, &cmd, send_ticks) != pdTRUE) {
+        if (critical_stop_cmd) {
+            ESP_LOGW(TAG, "motor_q full — stop/brake command could not be queued");
+        } else {
+            ESP_LOGW(TAG, "motor_q full — motor command dropped");
+        }
     }
 }
 
