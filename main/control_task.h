@@ -16,7 +16,8 @@ typedef struct {
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 /**
- * Initialises the relay GPIO and spawns control_task on Core 1, priority 5.
+ * Spawns control_task on Core 1, priority 5, using the supplied queues for
+ * control coordination, including thermal command dispatch.
  * Must be called once from app_main before the scheduler is running tasks
  * that write to temp_q or cmd_q.
  */
