@@ -80,9 +80,19 @@ static void send_thermal_cmd(bool enabled, float setpoint) {
     if (s_cfg.thermal_q == NULL) {
         return;
     }
+
     thermal_cmd_t cmd = { .enabled = enabled, .setpoint = setpoint };
     if (xQueueSend(s_cfg.thermal_q, &cmd, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "thermal_q full — thermal command dropped");
+        /*
+         * Keep the latest thermal command instead of dropping it. This is
+         * especially important for OFF transitions, which may only be sent
+         * once on state entry.
+         */
+        ESP_LOGW(TAG, "thermal_q full — replacing stale thermal command");
+        xQueueReset(s_cfg.thermal_q);
+        if (xQueueSend(s_cfg.thermal_q, &cmd, pdMS_TO_TICKS(10)) != pdTRUE) {
+            ESP_LOGE(TAG, "failed to enqueue thermal command after queue reset");
+        }
     }
 }
 
