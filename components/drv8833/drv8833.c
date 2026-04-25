@@ -140,17 +140,19 @@ esp_err_t drv8833_ramp_to_speed(drv8833_dev_t *dev, drv8833_channel_t ch,
         return drv8833_set_speed(dev, ch, target_pct);
     }
 
-    int8_t  start  = dev->cur_speed[ch];
-    int     diff   = (int)target_pct - (int)start;
-    uint32_t steps = ramp_ms / RAMP_STEP_MS;
-    if (steps == 0) steps = 1;
+    int8_t  start     = dev->cur_speed[ch];
+    int     diff      = (int)target_pct - (int)start;
+    uint32_t intervals = (ramp_ms + RAMP_STEP_MS - 1u) / RAMP_STEP_MS;
+    uint32_t steps     = intervals + 1u;
 
     for (uint32_t step = 1; step <= steps; step++) {
         int8_t v = (int8_t)(start + diff * (int)step / (int)steps);
         ESP_RETURN_ON_ERROR(drv8833_set_speed(dev, ch, v),
-                            TAG, "ramp set_speed failed at step %lu", (unsigned long)step);
+                            TAG, "ramp set_speed failed at step %"PRIu32, step);
         if (step < steps) {
-            vTaskDelay(pdMS_TO_TICKS(RAMP_STEP_MS));
+            uint32_t elapsed_before = (ramp_ms * (step - 1u)) / intervals;
+            uint32_t elapsed_after  = (ramp_ms * step) / intervals;
+            vTaskDelay(pdMS_TO_TICKS(elapsed_after - elapsed_before));
         }
     }
     return ESP_OK;
