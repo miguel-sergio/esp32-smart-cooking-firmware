@@ -5,9 +5,10 @@
 /**
  * @brief Validate the DRV8833 driver against live hardware.
  *
- * Exercises both motor channels through forward, brake, reverse and coast
- * sequences, then tests the sleep/wake cycle and reads the FAULT pin.
- * All API calls must return ESP_OK for the test to pass.
+ * Performs a basic runtime sanity check by ramping Channel A forward and
+ * then commanding coast. This test does not exercise Channel B, brake or
+ * reverse modes, sleep/wake control, or FAULT-pin handling.
+ * All invoked API calls must return ESP_OK for the test to pass.
  *
  * @return ESP_OK if all operations succeed, error code on first failure.
  */
