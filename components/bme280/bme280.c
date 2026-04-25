@@ -108,7 +108,8 @@ static uint32_t comp_humidity(const bme280_calib_t *c, int32_t adc, int32_t t_fi
  * -------------------------------------------------------------------------- */
 
 /* Configure the sensor after the I2C device handle has been added.
- * All failures propagate upward; the caller owns cleanup of i2c_dev. */
+ * All failures propagate upward; cleanup of i2c_dev is handled by the caller's
+ * error path (currently bme280_init()), not by this helper. */
 static esp_err_t bme280_configure(bme280_dev_t *dev) {
     uint8_t id;
     ESP_RETURN_ON_ERROR(reg_read(dev, REG_ID, &id, 1),
