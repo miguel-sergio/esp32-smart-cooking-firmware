@@ -88,13 +88,13 @@ void app_main(void) {
 
     /* --- Start sensor task --------------------------------------------- */
     BaseType_t ret = xTaskCreatePinnedToCore(
-        sensor_task,   /* task function   */
-        "sensor",      /* name            */
-        4096,          /* stack bytes     */
-        NULL,          /* arg             */
-        5,             /* priority        */
-        NULL,          /* handle          */
-        1              /* core — real-time tasks on Core 1 */
+        sensor_task,                 /* task function                    */
+        "sensor",                    /* name                             */
+        (4096 / sizeof(StackType_t)),/* stack words (4096 bytes total)   */
+        NULL,                        /* arg                              */
+        5,                           /* priority                         */
+        NULL,                        /* handle                           */
+        1                            /* core — real-time tasks on Core 1 */
     );
     configASSERT(ret == pdPASS);
 }
