@@ -157,9 +157,10 @@ static void control_task(void *arg) {
         mqtt_cmd_t cmd     = {0};
         bool       got_cmd = (xQueueReceive(s_cfg.cmd_q, &cmd, 0) == pdTRUE);
 
-        /* ESTOP is immediate and unconditional (except already in ERROR) */
-        if (got_cmd && cmd.type == CMD_ESTOP &&
-                state != COOKING_STATE_ERROR) {
+        /* ESTOP is immediate and unconditional — always latch FAULT_ESTOP so
+         * telemetry reflects the most recent safety event, even if already
+         * in ERROR due to a different fault. */
+        if (got_cmd && cmd.type == CMD_ESTOP) {
             active_fault = FAULT_ESTOP;
             state        = COOKING_STATE_ERROR;
         }
