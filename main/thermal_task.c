@@ -68,7 +68,9 @@ static void thermal_task(void *arg) {
     bool          relay_on     = false;
     TickType_t    period_ms    = IDLE_PERIOD_MS;
     TickType_t    last_wake    = xTaskGetTickCount();
-    TickType_t last_diag       = 0u; /* 30 s diagnostic anchor */
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+    TickType_t    last_diag    = 0u; /* 30 s diagnostic anchor */
+#endif
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
