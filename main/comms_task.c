@@ -83,7 +83,7 @@ static bool wifi_init(void) {
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "Wi-Fi connecting to SSID: \"%s\"", CONFIG_SMART_COOKING_WIFI_SSID);
-    ESP_LOGI(TAG, "MQTT broker: %s", CONFIG_SMART_COOKING_MQTT_BROKER_URI);
+    ESP_LOGI(TAG, "MQTT broker URI configured");
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
