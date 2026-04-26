@@ -4,6 +4,7 @@
 #include "driver/ledc.h"
 #include "esp_log.h"
 
+#include "bme280.h"
 #include "app_types.h"
 #include "control_task.h"
 #include "thermal_task.h"
@@ -24,7 +25,7 @@ static const char *TAG = "main";
  * No active brake or reverse is available on this channel.
  * AIN1 is driven by LEDC for speed control; AIN2 is not driven by the ESP32. */
 #define PIN_AIN1       25
-#define PIN_AIN2       26   /* tied to GND — ESP32 must keep this pin as input/high-Z */
+#define PIN_AIN2       26   /* dummy — IN2 is hardwired to GND on board; not wired to this GPIO */
 #define PIN_BIN1       27   /* unused channel B — reserved */
 #define PIN_BIN2       14   /* unused channel B — reserved */
 #define PIN_NSLEEP     (-1) /* not connected */
