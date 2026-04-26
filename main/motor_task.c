@@ -76,11 +76,11 @@ static void motor_task(void *arg) {
             cmd = newer;
         }
 
-        /* ── 2. Brake: immediate, no ramp ──────────────────────────────── */
+        /* ── 2. Brake request: treat as immediate stop/coast, no ramp ─── */
         if (cmd.brake) {
-            drv8833_brake(&drv, s_cfg.ch);
+            drv8833_set_speed(&drv, s_cfg.ch, 0);
             current_duty = 0;
-            ESP_LOGI(TAG, "Brake applied");
+            ESP_LOGI(TAG, "Motor stopped immediately");
 
         /* ── 3. Stop requested ─────────────────────────────────────────── */
         } else if (cmd.duty_pct == 0) {
