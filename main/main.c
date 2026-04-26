@@ -11,6 +11,9 @@
 #include "thermal_task.h"
 #include "motor_task.h"
 #include "comms_task.h"
+#if CONFIG_SMART_COOKING_CLI
+#include "cli_task.h"
+#endif
 
 static const char *TAG = "main";
 
@@ -123,6 +126,14 @@ void app_main(void) {
         .cmd_q   = s_cmd_q,
     };
     comms_task_start(&comms_cfg);
+
+#if CONFIG_SMART_COOKING_CLI
+    /* ── Start CLI task (M3 testing only) ──────────────────────────── */
+    cli_task_config_t cli_cfg = {
+        .cmd_q = s_cmd_q,
+    };
+    cli_task_start(&cli_cfg);
+#endif
 
     ESP_LOGI(TAG, "Firmware started — control_task + thermal_task + motor_task + comms_task running");
 }

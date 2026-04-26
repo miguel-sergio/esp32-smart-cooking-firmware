@@ -167,19 +167,34 @@ static void thermal_task(void *arg) {
         }
 #endif
 
-        /* ── 5. Sleep for period_ms using vTaskDelayUntil in WDT-safe chunks */
+        /* ── 5. Sleep for period_ms using vTaskDelayUntil in WDT-safe chunks
+         *
+         * Each chunk also peeks at thermal_q. If a new command is waiting,
+         * we break early so it is processed at the top of the next iteration
+         * without delay. The cadence anchor (last_wake) is reset to now on
+         * early wake so the next period starts from the wake-up point.     */
         TickType_t sub_wake = last_wake;
         TickType_t end_wake = last_wake + pdMS_TO_TICKS(period_ms);
+        bool       early    = false;
 
         while ((TickType_t)(end_wake - sub_wake) > WDT_CHUNK_TICKS) {
+            thermal_cmd_t peek;
+            if (xQueuePeek(s_cfg.thermal_q, &peek, 0) == pdTRUE) {
+                early = true;
+                break;
+            }
             vTaskDelayUntil(&sub_wake, WDT_CHUNK_TICKS);
             ESP_ERROR_CHECK(esp_task_wdt_reset());
         }
-        if (sub_wake != end_wake) {
-            vTaskDelayUntil(&sub_wake, (TickType_t)(end_wake - sub_wake));
+        if (!early) {
+            if (sub_wake != end_wake) {
+                vTaskDelayUntil(&sub_wake, (TickType_t)(end_wake - sub_wake));
+            }
+            ESP_ERROR_CHECK(esp_task_wdt_reset());
+            last_wake = sub_wake;           /* normal path: advance by period_ms */
+        } else {
+            last_wake = xTaskGetTickCount(); /* early wake: restart anchor from now */
         }
-        ESP_ERROR_CHECK(esp_task_wdt_reset());
-        last_wake = sub_wake;
     }
 }
 
