@@ -138,10 +138,11 @@ static void control_task(void *arg) {
     fault_type_t             active_fault = FAULT_NONE;
     const cooking_profile_t *profile      = &s_profiles[0];
 
-    uint32_t cook_start_ms = 0;
-    uint32_t done_start_ms = 0;
-    uint32_t last_temp_ms  = 0;
-    float    last_temp     = 0.0f;
+    uint32_t cook_start_ms        = 0;
+    uint32_t done_start_ms        = 0;
+    uint32_t last_temp_ms         = 0;
+    uint32_t below_target_since_ms = 0;   /* start of current below-target window, 0 = at target */
+    float    last_temp            = 0.0f;
 
     TickType_t last_wake  = xTaskGetTickCount();
 #if CONFIG_SMART_COOKING_STABILITY_TEST
@@ -192,7 +193,8 @@ static void control_task(void *arg) {
                 break;
 
             case COOKING_STATE_COOKING:
-                cook_start_ms = tick;
+                cook_start_ms         = tick;
+                below_target_since_ms = 0u;
                 send_thermal_cmd(true, profile->cook_target);
                 send_motor_cmd(profile->motor_duty_pct, false);
                 break;
@@ -261,12 +263,19 @@ static void control_task(void *arg) {
                 state        = COOKING_STATE_ERROR;
                 break;
             }
-            /* Fault: heater not keeping temperature */
-            if (last_temp < (profile->cook_target - 1.0f) &&
-                    (tick - cook_start_ms) > HEAT_RISE_MS) {
-                active_fault = FAULT_HEATER_FAIL;
-                state        = COOKING_STATE_ERROR;
-                break;
+            /* Fault: temperature below cook target for 2 consecutive minutes.
+             * The consolidation window resets whenever temperature recovers.
+             * This detects heater failure at any point during the cook cycle. */
+            if (last_temp < (profile->cook_target - 1.0f)) {
+                if (below_target_since_ms == 0u) {
+                    below_target_since_ms = tick;   /* start consolidation window */
+                } else if ((tick - below_target_since_ms) > HEAT_RISE_MS) {
+                    active_fault = FAULT_HEATER_FAIL;
+                    state        = COOKING_STATE_ERROR;
+                    break;
+                }
+            } else {
+                below_target_since_ms = 0u;         /* recovered — reset window */
             }
             /* Operator abort */
             if (got_cmd && cmd.type == CMD_STOP) {
