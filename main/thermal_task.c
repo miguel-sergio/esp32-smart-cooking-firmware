@@ -148,6 +148,10 @@ static void thermal_task(void *arg) {
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 void thermal_task_start(const thermal_task_config_t *cfg) {
+    configASSERT(cfg != NULL);
+    configASSERT(cfg->temp_q != NULL);
+    configASSERT(cfg->i2c_bus != NULL);
+    configASSERT(GPIO_IS_VALID_OUTPUT_GPIO((gpio_num_t)cfg->relay_gpio));
     s_cfg = *cfg;
 
     BaseType_t ret = xTaskCreatePinnedToCore(
