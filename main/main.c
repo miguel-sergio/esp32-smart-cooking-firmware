@@ -1,12 +1,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "driver/i2c_master.h"
+#include "driver/ledc.h"
 #include "esp_log.h"
 
 #include "app_types.h"
 #include "control_task.h"
 #include "thermal_task.h"
-#include "bme280.h"
+#include "motor_task.h"
 
 static const char *TAG = "main";
 
@@ -17,6 +18,17 @@ static const char *TAG = "main";
 #define PIN_SCL        22
 #define PIN_RELAY      32
 #define BME280_ADDR    BME280_I2C_ADDR_DEFAULT
+
+/* DRV8833 — Channel A drives the stirrer motor
+ * AIN2 is hardwired to GND on the PCB — motor is unidirectional (forward/coast only).
+ * No active brake or reverse is available on this channel.
+ * AIN1 is driven by LEDC for speed control; AIN2 is not driven by the ESP32. */
+#define PIN_AIN1       25
+#define PIN_AIN2       26   /* tied to GND — ESP32 must keep this pin as input/high-Z */
+#define PIN_BIN1       27   /* unused channel B — reserved */
+#define PIN_BIN2       14   /* unused channel B — reserved */
+#define PIN_NSLEEP     (-1) /* not connected */
+#define PIN_FAULT      (-1) /* not connected */
 
 /* ── Inter-task queues ───────────────────────────────────────────────────
  * Created once in app_main and passed by pointer to each task at start.
@@ -73,5 +85,26 @@ void app_main(void) {
     };
     thermal_task_start(&therm_cfg);
 
-    ESP_LOGI(TAG, "Firmware started — control_task + thermal_task running");
+    /* ── Init DRV8833 & start motor_task ────────────────────────── */
+    motor_task_config_t motor_cfg = {
+        .drv_cfg = {
+            .ain1_gpio    = PIN_AIN1,
+            .ain2_gpio    = PIN_AIN2,
+            .ain1_ledc_ch = LEDC_CHANNEL_0,
+            .ain2_ledc_ch = LEDC_CHANNEL_1,
+            .bin1_gpio    = PIN_BIN1,
+            .bin2_gpio    = PIN_BIN2,
+            .bin1_ledc_ch = LEDC_CHANNEL_2,
+            .bin2_ledc_ch = LEDC_CHANNEL_3,
+            .ledc_timer   = LEDC_TIMER_0,
+            .pwm_freq_hz  = 20000u,
+            .nsleep_gpio  = PIN_NSLEEP,
+            .fault_gpio   = PIN_FAULT,
+        },
+        .ch      = DRV8833_CHANNEL_A,
+        .motor_q = s_motor_q,
+    };
+    motor_task_start(&motor_cfg);
+
+    ESP_LOGI(TAG, "Firmware started — control_task + thermal_task + motor_task running");
 }
