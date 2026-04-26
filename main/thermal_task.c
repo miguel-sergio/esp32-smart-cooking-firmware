@@ -75,6 +75,7 @@ static void thermal_task(void *arg) {
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
     for (;;) {
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
         /* ── 1. Drain thermal_q — keep most recent command ──────────────── */
         thermal_cmd_t cmd;
         bool period_changed = false;
