@@ -91,6 +91,9 @@ static void motor_task(void *arg) {
         /* ── 1. Wait for a command (4 s max to satisfy WDT) ─────────────── */
         motor_cmd_t cmd;
         if (xQueueReceive(s_cfg.motor_q, &cmd, pdMS_TO_TICKS(4000u)) == pdTRUE) {
+            /* The receive may have blocked for most of the TWDT interval;
+             * reset again before any follow-up processing. */
+            ESP_ERROR_CHECK(esp_task_wdt_reset());
 
             /* Drain — keep the most recent command */
             motor_cmd_t newer;
