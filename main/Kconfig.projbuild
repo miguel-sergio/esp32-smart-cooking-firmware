@@ -26,4 +26,13 @@ menu "Smart Cooking App"
             and control_task also logs heap statistics. Intended for
             stability testing only — do not enable in production builds.
 
+    config SMART_COOKING_CLI
+        bool "Enable UART CLI for manual command injection"
+        default n
+        help
+            When enabled, a lightweight CLI task reads single-character
+            commands from UART0 (the serial monitor port) and injects them
+            into the control command queue. Intended for M3 hardware testing
+            before MQTT commands are available. Do not enable in production.
+
 endmenu

@@ -20,6 +20,7 @@ typedef enum {
     FAULT_OVERTEMP,         /* temperature exceeded safety cutoff    */
     FAULT_SENSOR_TIMEOUT,   /* no valid BME280 reading for >3 s      */
     FAULT_ESTOP,            /* emergency stop received via MQTT      */
+    FAULT_HEATER_FAIL,      /* temp not rising within HEAT_RISE_MS   */
 } fault_type_t;
 
 /* ── Inter-task message types ───────────────────────────────────────────── */

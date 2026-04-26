@@ -159,6 +159,7 @@ static const char *fault_name(fault_type_t f) {
     case FAULT_OVERTEMP:       return "OVERTEMP";
     case FAULT_SENSOR_TIMEOUT: return "SENSOR_TIMEOUT";
     case FAULT_ESTOP:          return "ESTOP";
+    case FAULT_HEATER_FAIL:    return "HEATER_FAIL";
     default:                   return "UNKNOWN";
     }
 }
