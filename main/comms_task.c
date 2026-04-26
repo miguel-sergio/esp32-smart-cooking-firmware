@@ -85,10 +85,13 @@ static bool wifi_init(void) {
     ESP_LOGI(TAG, "Wi-Fi connecting to SSID: \"%s\"", CONFIG_SMART_COOKING_WIFI_SSID);
     ESP_LOGI(TAG, "MQTT broker URI configured");
 
+    /* Wait until either connected or all retries exhausted.
+     * WIFI_FAIL_BIT is always set after WIFI_MAX_RETRIES disconnects,
+     * so this never blocks indefinitely. */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(15000u));
+                                           portMAX_DELAY);
 
     if ((bits & WIFI_CONNECTED_BIT) != 0u) {
         return true;
