@@ -18,6 +18,7 @@ static const char *TAG = "ctrl";
 
 #define SENSOR_TIMEOUT_MS   3000u       /* fault if no reading for 3 s     */
 #define DONE_AUTORETURN_MS  60000u      /* SRD: auto-return IDLE 60 s after DONE */
+#define HEAT_RISE_MS        120000u     /* fault if temp below cook_target for >2 min in COOKING */
 
 /* ── Cooking profiles ───────────────────────────────────────────────────── */
 /* Stored in NVS in a future milestone; compile-time constants for v1.0.    */
@@ -74,6 +75,7 @@ static const char *fault_name(fault_type_t f) {
     case FAULT_OVERTEMP:       return "OVERTEMP";
     case FAULT_SENSOR_TIMEOUT: return "SENSOR_TIMEOUT";
     case FAULT_ESTOP:          return "ESTOP";
+    case FAULT_HEATER_FAIL:    return "HEATER_FAIL";
     default:                   return "UNKNOWN";
     }
 }
@@ -256,6 +258,13 @@ static void control_task(void *arg) {
             /* Fault: overtemp */
             if (last_temp > profile->safety_cutoff) {
                 active_fault = FAULT_OVERTEMP;
+                state        = COOKING_STATE_ERROR;
+                break;
+            }
+            /* Fault: heater not keeping temperature */
+            if (last_temp < (profile->cook_target - 1.0f) &&
+                    (tick - cook_start_ms) > HEAT_RISE_MS) {
+                active_fault = FAULT_HEATER_FAIL;
                 state        = COOKING_STATE_ERROR;
                 break;
             }

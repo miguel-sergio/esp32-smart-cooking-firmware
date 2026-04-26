@@ -73,6 +73,9 @@ ERROR state.
 | OVERTEMP | Measured temperature exceeds profile safety limit |
 | SENSOR_TIMEOUT | No valid BME280 reading for more than 3 seconds |
 | ESTOP | Emergency stop command received remotely |
+| Heater failure *(CR-001)* | Temperature remains more than 1 °C below the cooking target for more than 2 minutes after entering the COOKING phase |
+
+> **CR-001** — *Change request raised 2026-04-26.* Added a heater-failure fault to detect a non-functioning or disconnected heating element during the COOKING phase. Without this check the system would complete the cook timer and transition to DONE regardless of whether the target temperature was ever reached, delivering an unsafe output.
 
 In ERROR state: motor stops immediately, heating element PWM set to 0%,
 fault type and timestamp logged via UART, fault published remotely.

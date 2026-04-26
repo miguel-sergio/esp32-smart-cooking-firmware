@@ -127,7 +127,9 @@ stateDiagram-v2
 | OVERTEMP | Temperature exceeds safety limit |
 | SENSOR_TIMEOUT | No valid reading for more than 3 seconds |
 | ESTOP | Emergency stop received via MQTT |
+| Heater failure *(CR-001)* | Temperature remains more than 1 °C below the cooking target for more than 2 minutes in the COOKING phase |
 
+> **CR-001** — *Change request raised 2026-04-26.* A new heater-failure fault condition was added to the fault detection subsystem. The state controller monitors temperature continuously during the COOKING phase; if the measured temperature has not reached the cooking target after 2 minutes, the system transitions to ERROR. Rationale: without this guard the cook timer completes normally even if the heating element is disconnected or has failed, producing an unsafe DONE state at ambient temperature.
 **Traces:** FR-01, FR-05, NFR-01
 
 ---
