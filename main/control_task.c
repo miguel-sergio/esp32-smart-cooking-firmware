@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 static const char *TAG = "ctrl";
 
@@ -141,7 +142,10 @@ static void control_task(void *arg) {
 
     TickType_t last_wake = xTaskGetTickCount();
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     for (;;) {
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
         uint32_t tick = now_ms();
 
         /* ── 1. Drain temp queue — keep the most recent valid reading ───── */

@@ -4,6 +4,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 static const char *TAG = "motor";
 
@@ -82,57 +83,62 @@ static void motor_task(void *arg) {
 
     int8_t current_duty = 0;
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     for (;;) {
-        /* ── 1. Wait for a command ──────────────────────────────────────── */
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+        /* ── 1. Wait for a command (4 s max to satisfy WDT) ─────────────── */
         motor_cmd_t cmd;
-        xQueueReceive(s_cfg.motor_q, &cmd, portMAX_DELAY);
+        if (xQueueReceive(s_cfg.motor_q, &cmd, pdMS_TO_TICKS(4000u)) == pdTRUE) {
 
-        /* Drain — keep the most recent command */
-        motor_cmd_t newer;
-        while (xQueueReceive(s_cfg.motor_q, &newer, 0) == pdTRUE) {
-            cmd = newer;
-        }
+            /* Drain — keep the most recent command */
+            motor_cmd_t newer;
+            while (xQueueReceive(s_cfg.motor_q, &newer, 0) == pdTRUE) {
+                cmd = newer;
+            }
 
-        /* ── 2. Brake request: treat as immediate stop/coast, no ramp ─── */
-        if (cmd.brake) {
-            drv8833_set_speed(&drv, s_cfg.ch, 0);
-            current_duty = 0;
-            ESP_LOGI(TAG, "Motor stopped immediately");
+            /* ── 2. Brake request: treat as immediate stop/coast, no ramp ─── */
+            if (cmd.brake) {
+                drv8833_set_speed(&drv, s_cfg.ch, 0);
+                current_duty = 0;
+                ESP_LOGI(TAG, "Motor stopped immediately");
 
-        /* ── 3. Stop requested ─────────────────────────────────────────── */
-        } else if (cmd.duty_pct == 0) {
-            if (current_duty != 0) {
-                bool interrupted = ramp_to(&drv, 0, RAMP_DOWN_MS, &cmd);
+            /* ── 3. Stop requested ─────────────────────────────────────────── */
+            } else if (cmd.duty_pct == 0) {
+                if (current_duty != 0) {
+                    bool interrupted = ramp_to(&drv, 0, RAMP_DOWN_MS, &cmd);
+                    current_duty = drv.cur_speed[s_cfg.ch];
+                    if (!interrupted && current_duty == 0) {
+                        ESP_LOGI(TAG, "Motor stopped");
+                    } else if (interrupted) {
+                        if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
+                            ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
+                        }
+                    }
+                }
+
+            /* ── 4. Ramp up to target ──────────────────────────────────────── */
+            } else if (current_duty == 0) {
+                /* Starting from rest — ramp up */
+                int8_t target = cmd.duty_pct;
+                bool interrupted = ramp_to(&drv, target, RAMP_UP_MS, &cmd);
                 current_duty = drv.cur_speed[s_cfg.ch];
-                if (!interrupted && current_duty == 0) {
-                    ESP_LOGI(TAG, "Motor stopped");
+                if (!interrupted && current_duty == target) {
+                    ESP_LOGI(TAG, "Motor running at %d%%", current_duty);
                 } else if (interrupted) {
+                    /* New command arrived mid-ramp — re-queue it */
                     if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
                         ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
                     }
                 }
+            } else {
+                /* Already running — jump directly to new duty (no ramp) */
+                drv8833_set_speed(&drv, s_cfg.ch, cmd.duty_pct);
+                current_duty = cmd.duty_pct;
+                ESP_LOGI(TAG, "Motor duty → %d%%", current_duty);
             }
-
-        /* ── 4. Ramp up to target ──────────────────────────────────────── */
-        } else if (current_duty == 0) {
-            /* Starting from rest — ramp up */
-            int8_t target = cmd.duty_pct;
-            bool interrupted = ramp_to(&drv, target, RAMP_UP_MS, &cmd);
-            current_duty = drv.cur_speed[s_cfg.ch];
-            if (!interrupted && current_duty == target) {
-                ESP_LOGI(TAG, "Motor running at %d%%", current_duty);
-            } else if (interrupted) {
-                /* New command arrived mid-ramp — re-queue it */
-                if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
-                    ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
-                }
-            }
-        } else {
-            /* Already running — jump directly to new duty (no ramp) */
-            drv8833_set_speed(&drv, s_cfg.ch, cmd.duty_pct);
-            current_duty = cmd.duty_pct;
-            ESP_LOGI(TAG, "Motor duty → %d%%", current_duty);
-        }
+        } /* xQueueReceive */
     }
 }
 

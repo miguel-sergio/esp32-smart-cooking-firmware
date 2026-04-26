@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 #include "bme280.h"
 
@@ -61,23 +62,15 @@ static void thermal_task(void *arg) {
     thermal_cmd_t current_cmd  = { .enabled = false, .setpoint = 0.0f };
     bool          relay_on     = false;
     TickType_t    period_ms    = IDLE_PERIOD_MS;
-    TickType_t    last_wake    = xTaskGetTickCount();
+
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
     for (;;) {
         /* ── 1. Drain thermal_q — keep most recent command ──────────────── */
         thermal_cmd_t cmd;
-        bool period_changed = false;
         while (xQueueReceive(s_cfg.thermal_q, &cmd, 0) == pdTRUE) {
-            TickType_t new_period = cmd.enabled ? ACTIVE_PERIOD_MS : IDLE_PERIOD_MS;
-            if (new_period != period_ms) {
-                period_ms     = new_period;
-                period_changed = true;
-            }
+            period_ms   = cmd.enabled ? ACTIVE_PERIOD_MS : IDLE_PERIOD_MS;
             current_cmd = cmd;
-        }
-        /* Reset wake anchor so the new period starts from now, not the past */
-        if (period_changed) {
-            last_wake = xTaskGetTickCount();
         }
 
         /* ── 2. Read BME280 ─────────────────────────────────────────────── */
@@ -147,7 +140,15 @@ static void thermal_task(void *arg) {
                      data.temperature, data.humidity, relay_on ? "ON" : "OFF");
         }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(period_ms));
+        /* ── 5. Sleep for period_ms in WDT-safe chunks ──────────────────── */
+        TickType_t remaining = pdMS_TO_TICKS(period_ms);
+        const TickType_t chunk = pdMS_TO_TICKS(2500u);
+        while (remaining > 0) {
+            TickType_t sleep = (remaining < chunk) ? remaining : chunk;
+            vTaskDelay(sleep);
+            ESP_ERROR_CHECK(esp_task_wdt_reset());
+            remaining -= sleep;
+        }
     }
 }
 
