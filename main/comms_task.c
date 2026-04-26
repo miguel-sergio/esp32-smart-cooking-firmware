@@ -14,7 +14,7 @@ static const char *TAG = "comms";
 
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
-#define COMMS_STACK_WORDS   (6144u / sizeof(StackType_t))
+#define COMMS_STACK_WORDS   (4096u / sizeof(StackType_t))
 #define COMMS_PRIORITY      3
 #define COMMS_CORE          0
 
