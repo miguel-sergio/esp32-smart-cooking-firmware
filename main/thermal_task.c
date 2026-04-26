@@ -123,6 +123,12 @@ static void thermal_task(void *arg) {
                 }
             }
             /* within hysteresis band: hold current relay state */
+        } else {
+            if (relay_on) {
+                relay_on = false;
+                relay_set(false);
+                ESP_LOGW(TAG, "Relay OFF (invalid sensor reading)");
+            }
         }
 
         /* ── 4. Publish reading to control_task ─────────────────────────── */
