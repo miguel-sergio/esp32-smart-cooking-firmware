@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -176,7 +177,11 @@ static void comms_task(void *arg) {
     }
 
     /* ── Loop — drain state_q and log ──────────────────────────────────── */
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     for (;;) {
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+
         system_state_t state;
         if (xQueueReceive(s_cfg.state_q, &state, pdMS_TO_TICKS(1000u)) == pdTRUE) {
             ESP_LOGI(TAG, "state=%s  T=%.1f°C  fault=%s",

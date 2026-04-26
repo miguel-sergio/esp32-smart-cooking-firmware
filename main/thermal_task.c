@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 
 #include "bme280.h"
 
@@ -20,6 +21,11 @@ static const char *TAG = "thermal";
 #define IDLE_PERIOD_MS      10000u  /* 0.1 Hz — disabled (IDLE state)      */
 
 #define HYSTERESIS_DEG      1.0f    /* bang-bang dead band ±1 °C           */
+
+/* WDT chunk: half the configured WDT timeout in ticks.
+ * vTaskDelayUntil is called in these chunks so the WDT is fed well within
+ * the deadline regardless of the sleep period length. */
+#define WDT_CHUNK_TICKS     pdMS_TO_TICKS((CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u) / 2u)
 
 /* BME280 valid output ranges */
 #define TEMP_MIN_DEG       -40.0f
@@ -63,6 +69,8 @@ static void thermal_task(void *arg) {
     TickType_t    period_ms    = IDLE_PERIOD_MS;
     TickType_t    last_wake    = xTaskGetTickCount();
 
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
     for (;;) {
         /* ── 1. Drain thermal_q — keep most recent command ──────────────── */
         thermal_cmd_t cmd;
@@ -70,7 +78,7 @@ static void thermal_task(void *arg) {
         while (xQueueReceive(s_cfg.thermal_q, &cmd, 0) == pdTRUE) {
             TickType_t new_period = cmd.enabled ? ACTIVE_PERIOD_MS : IDLE_PERIOD_MS;
             if (new_period != period_ms) {
-                period_ms     = new_period;
+                period_ms      = new_period;
                 period_changed = true;
             }
             current_cmd = cmd;
@@ -147,7 +155,19 @@ static void thermal_task(void *arg) {
                      data.temperature, data.humidity, relay_on ? "ON" : "OFF");
         }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(period_ms));
+        /* ── 5. Sleep for period_ms using vTaskDelayUntil in WDT-safe chunks */
+        TickType_t sub_wake = last_wake;
+        TickType_t end_wake = last_wake + pdMS_TO_TICKS(period_ms);
+
+        while ((TickType_t)(end_wake - sub_wake) > WDT_CHUNK_TICKS) {
+            vTaskDelayUntil(&sub_wake, WDT_CHUNK_TICKS);
+            ESP_ERROR_CHECK(esp_task_wdt_reset());
+        }
+        if (sub_wake != end_wake) {
+            vTaskDelayUntil(&sub_wake, (TickType_t)(end_wake - sub_wake));
+        }
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+        last_wake = sub_wake;
     }
 }
 
