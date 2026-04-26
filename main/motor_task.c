@@ -25,31 +25,48 @@ static motor_task_config_t s_cfg;
 
 /**
  * Ramp from current HAL speed to target_pct over ramp_ms.
- * Checks motor_q every step — returns true if a new command arrived
- * (stored in *next_cmd), false if ramp completed without interruption.
+ * Drains motor_q each step — returns true if a new command arrived
+ * (most recent stored in *next_cmd), false if ramp completed without interruption.
+ * Returns false immediately on drv8833_set_speed() failure (error is logged).
  */
 static bool ramp_to(drv8833_dev_t *drv, int8_t target_pct, uint32_t ramp_ms, motor_cmd_t *next_cmd) {
     int8_t  start = drv->cur_speed[s_cfg.ch];
     int32_t steps = (int32_t)(ramp_ms / RAMP_STEP_MS);
 
     if (steps <= 0) {
-        drv8833_set_speed(drv, s_cfg.ch, target_pct);
+        esp_err_t err = drv8833_set_speed(drv, s_cfg.ch, target_pct);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ramp_to: drv8833_set_speed failed: %s", esp_err_to_name(err));
+        }
         return false;
     }
 
     for (int32_t i = 1; i <= steps; i++) {
-        /* Check queue before each step — abort if new command arrives */
-        if (xQueueReceive(s_cfg.motor_q, next_cmd, 0) == pdTRUE) {
+        /* Drain queue each step — keep only the most recent command */
+        motor_cmd_t tmp;
+        bool got_cmd = false;
+        while (xQueueReceive(s_cfg.motor_q, &tmp, 0) == pdTRUE) {
+            *next_cmd = tmp;
+            got_cmd = true;
+        }
+        if (got_cmd) {
             return true;
         }
 
         int8_t step_speed = (int8_t)(start + (int32_t)(target_pct - start) * i / steps);
-        drv8833_set_speed(drv, s_cfg.ch, step_speed);
+        esp_err_t err = drv8833_set_speed(drv, s_cfg.ch, step_speed);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "ramp_to: drv8833_set_speed failed: %s", esp_err_to_name(err));
+            return false;
+        }
         vTaskDelay(pdMS_TO_TICKS(RAMP_STEP_MS));
     }
 
     /* Final step: ensure exact target */
-    drv8833_set_speed(drv, s_cfg.ch, target_pct);
+    esp_err_t err = drv8833_set_speed(drv, s_cfg.ch, target_pct);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "ramp_to: final drv8833_set_speed failed: %s", esp_err_to_name(err));
+    }
     return false;
 }
 
@@ -85,9 +102,10 @@ static void motor_task(void *arg) {
         /* ── 3. Stop requested ─────────────────────────────────────────── */
         } else if (cmd.duty_pct == 0) {
             bool interrupted = ramp_to(&drv, 0, RAMP_DOWN_MS, &cmd);
-            current_duty = 0;
-            ESP_LOGI(TAG, "Motor stopped");
-            if (interrupted) {
+            current_duty = drv.cur_speed[s_cfg.ch];
+            if (!interrupted && current_duty == 0) {
+                ESP_LOGI(TAG, "Motor stopped");
+            } else if (interrupted) {
                 if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
                     ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
                 }
@@ -96,13 +114,13 @@ static void motor_task(void *arg) {
         /* ── 4. Ramp up to target ──────────────────────────────────────── */
         } else if (current_duty == 0) {
             /* Starting from rest — ramp up */
-            bool interrupted = ramp_to(&drv, cmd.duty_pct, RAMP_UP_MS, &cmd);
-            if (!interrupted) {
-                current_duty = cmd.duty_pct;
+            int8_t target = cmd.duty_pct;
+            bool interrupted = ramp_to(&drv, target, RAMP_UP_MS, &cmd);
+            current_duty = drv.cur_speed[s_cfg.ch];
+            if (!interrupted && current_duty == target) {
                 ESP_LOGI(TAG, "Motor running at %d%%", current_duty);
-            } else {
+            } else if (interrupted) {
                 /* New command arrived mid-ramp — re-queue it */
-                current_duty = drv.cur_speed[s_cfg.ch];
                 if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
                     ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
                 }
