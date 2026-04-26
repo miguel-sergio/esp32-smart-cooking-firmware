@@ -18,4 +18,12 @@ menu "Smart Cooking App"
         help
             URI of the MQTT broker, e.g. mqtt://192.168.1.100:1883
 
+    config SMART_COOKING_STABILITY_TEST
+        bool "Enable stability test diagnostics"
+        default n
+        help
+            When enabled, tasks log stack high-watermark every 30 seconds,
+            and control_task also logs heap statistics. Intended for
+            stability testing only — do not enable in production builds.
+
 endmenu

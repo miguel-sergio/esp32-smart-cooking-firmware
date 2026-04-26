@@ -179,6 +179,10 @@ static void comms_task(void *arg) {
     /* ── Loop — drain state_q and log ──────────────────────────────────── */
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+    TickType_t last_diag = 0u; /* 30 s diagnostic anchor */
+#endif
+
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
 
@@ -192,6 +196,15 @@ static void comms_task(void *arg) {
 
         /* TODO M4: publish state to MQTT */
         (void)mqtt_client;
+
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+        /* ── Periodic diagnostics (every 30 s) ──────────────────────────── */
+        if ((xTaskGetTickCount() - last_diag) >= pdMS_TO_TICKS(30000u)) {
+            ESP_LOGI(TAG, "DIAG stack_hwm=%u words",
+                     uxTaskGetStackHighWaterMark(NULL));
+            last_diag = xTaskGetTickCount();
+        }
+#endif
     }
 }
 
