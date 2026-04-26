@@ -22,8 +22,8 @@ menu "Smart Cooking App"
         bool "Enable stability test diagnostics"
         default n
         help
-            When enabled, each task logs heap and stack high-watermark every
-            30 seconds. Intended for stability testing only — do not
-            enable in production builds.
+            When enabled, tasks log stack high-watermark every 30 seconds,
+            and control_task also logs heap statistics. Intended for
+            stability testing only — do not enable in production builds.
 
 endmenu
