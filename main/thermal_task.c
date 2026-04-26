@@ -22,6 +22,11 @@ static const char *TAG = "thermal";
 
 #define HYSTERESIS_DEG      1.0f    /* bang-bang dead band ±1 °C           */
 
+/* WDT chunk: half the configured WDT timeout in ticks.
+ * vTaskDelayUntil is called in these chunks so the WDT is fed well within
+ * the deadline regardless of the sleep period length. */
+#define WDT_CHUNK_TICKS     pdMS_TO_TICKS((CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u) / 2u)
+
 /* BME280 valid output ranges */
 #define TEMP_MIN_DEG       -40.0f
 #define TEMP_MAX_DEG        85.0f
@@ -62,15 +67,25 @@ static void thermal_task(void *arg) {
     thermal_cmd_t current_cmd  = { .enabled = false, .setpoint = 0.0f };
     bool          relay_on     = false;
     TickType_t    period_ms    = IDLE_PERIOD_MS;
+    TickType_t    last_wake    = xTaskGetTickCount();
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
     for (;;) {
         /* ── 1. Drain thermal_q — keep most recent command ──────────────── */
         thermal_cmd_t cmd;
+        bool period_changed = false;
         while (xQueueReceive(s_cfg.thermal_q, &cmd, 0) == pdTRUE) {
-            period_ms   = cmd.enabled ? ACTIVE_PERIOD_MS : IDLE_PERIOD_MS;
+            TickType_t new_period = cmd.enabled ? ACTIVE_PERIOD_MS : IDLE_PERIOD_MS;
+            if (new_period != period_ms) {
+                period_ms      = new_period;
+                period_changed = true;
+            }
             current_cmd = cmd;
+        }
+        /* Reset wake anchor so the new period starts from now, not the past */
+        if (period_changed) {
+            last_wake = xTaskGetTickCount();
         }
 
         /* ── 2. Read BME280 ─────────────────────────────────────────────── */
@@ -140,15 +155,19 @@ static void thermal_task(void *arg) {
                      data.temperature, data.humidity, relay_on ? "ON" : "OFF");
         }
 
-        /* ── 5. Sleep for period_ms in WDT-safe chunks ──────────────────── */
-        TickType_t remaining = pdMS_TO_TICKS(period_ms);
-        const TickType_t chunk = pdMS_TO_TICKS(2500u);
-        while (remaining > 0) {
-            TickType_t sleep = (remaining < chunk) ? remaining : chunk;
-            vTaskDelay(sleep);
+        /* ── 5. Sleep for period_ms using vTaskDelayUntil in WDT-safe chunks */
+        TickType_t sub_wake = last_wake;
+        TickType_t end_wake = last_wake + pdMS_TO_TICKS(period_ms);
+
+        while ((TickType_t)(end_wake - sub_wake) > WDT_CHUNK_TICKS) {
+            vTaskDelayUntil(&sub_wake, WDT_CHUNK_TICKS);
             ESP_ERROR_CHECK(esp_task_wdt_reset());
-            remaining -= sleep;
         }
+        if (sub_wake != end_wake) {
+            vTaskDelayUntil(&sub_wake, (TickType_t)(end_wake - sub_wake));
+        }
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+        last_wake = sub_wake;
     }
 }
 
