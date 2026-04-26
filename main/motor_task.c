@@ -101,13 +101,15 @@ static void motor_task(void *arg) {
 
         /* ── 3. Stop requested ─────────────────────────────────────────── */
         } else if (cmd.duty_pct == 0) {
-            bool interrupted = ramp_to(&drv, 0, RAMP_DOWN_MS, &cmd);
-            current_duty = drv.cur_speed[s_cfg.ch];
-            if (!interrupted && current_duty == 0) {
-                ESP_LOGI(TAG, "Motor stopped");
-            } else if (interrupted) {
-                if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
-                    ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
+            if (current_duty != 0) {
+                bool interrupted = ramp_to(&drv, 0, RAMP_DOWN_MS, &cmd);
+                current_duty = drv.cur_speed[s_cfg.ch];
+                if (!interrupted && current_duty == 0) {
+                    ESP_LOGI(TAG, "Motor stopped");
+                } else if (interrupted) {
+                    if (xQueueSendToFront(s_cfg.motor_q, &cmd, 0) != pdTRUE) {
+                        ESP_LOGW(TAG, "motor_q full — could not re-queue interrupted command");
+                    }
                 }
             }
 
