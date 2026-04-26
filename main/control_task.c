@@ -5,6 +5,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
+#include "esp_system.h"
 
 static const char *TAG = "ctrl";
 
@@ -140,7 +141,10 @@ static void control_task(void *arg) {
     uint32_t last_temp_ms  = 0;
     float    last_temp     = 0.0f;
 
-    TickType_t last_wake = xTaskGetTickCount();
+    TickType_t last_wake  = xTaskGetTickCount();
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+    TickType_t last_diag  = 0u; /* anchor for 30 s diagnostic log */
+#endif
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
@@ -284,6 +288,17 @@ static void control_task(void *arg) {
 
         /* ── 5. Publish current state to comms_task ─────────────────────── */
         publish_state(state, last_temp, active_fault);
+
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+        /* ── 6. Periodic diagnostics (every 30 s) ──────────────────────── */
+        if ((xTaskGetTickCount() - last_diag) >= pdMS_TO_TICKS(30000u)) {
+            ESP_LOGI(TAG, "DIAG heap_free=%" PRIu32 " heap_min=%" PRIu32 " stack_hwm=%u words",
+                     (uint32_t)esp_get_free_heap_size(),
+                     (uint32_t)esp_get_minimum_free_heap_size(),
+                     uxTaskGetStackHighWaterMark(NULL));
+            last_diag = xTaskGetTickCount();
+        }
+#endif
 
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CTRL_LOOP_MS));
     }

@@ -68,6 +68,7 @@ static void thermal_task(void *arg) {
     bool          relay_on     = false;
     TickType_t    period_ms    = IDLE_PERIOD_MS;
     TickType_t    last_wake    = xTaskGetTickCount();
+    TickType_t last_diag       = 0u; /* 30 s diagnostic anchor */
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
@@ -154,6 +155,15 @@ static void thermal_task(void *arg) {
             ESP_LOGI(TAG, "T: %.1f°C  H: %.1f%%  relay: %s",
                      data.temperature, data.humidity, relay_on ? "ON" : "OFF");
         }
+
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+        /* ── Periodic diagnostics (every 30 s) ──────────────────────────── */
+        if ((xTaskGetTickCount() - last_diag) >= pdMS_TO_TICKS(30000u)) {
+            ESP_LOGI(TAG, "DIAG stack_hwm=%u words",
+                     uxTaskGetStackHighWaterMark(NULL));
+            last_diag = xTaskGetTickCount();
+        }
+#endif
 
         /* ── 5. Sleep for period_ms using vTaskDelayUntil in WDT-safe chunks */
         TickType_t sub_wake = last_wake;

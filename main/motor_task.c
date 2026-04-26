@@ -81,7 +81,10 @@ static void motor_task(void *arg) {
     ESP_ERROR_CHECK(drv8833_init(&s_cfg.drv_cfg, &drv));
     ESP_LOGI(TAG, "DRV8833 initialised");
 
-    int8_t current_duty = 0;
+    int8_t     current_duty = 0;
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+    TickType_t last_diag    = 0u; /* 30 s diagnostic anchor */
+#endif
 
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
@@ -142,6 +145,15 @@ static void motor_task(void *arg) {
                 ESP_LOGI(TAG, "Motor duty → %d%%", current_duty);
             }
         } /* xQueueReceive */
+
+#if CONFIG_SMART_COOKING_STABILITY_TEST
+        /* ── Periodic diagnostics (every 30 s) ──────────────────────────── */
+        if ((xTaskGetTickCount() - last_diag) >= pdMS_TO_TICKS(30000u)) {
+            ESP_LOGI(TAG, "DIAG stack_hwm=%u words",
+                     uxTaskGetStackHighWaterMark(NULL));
+            last_diag = xTaskGetTickCount();
+        }
+#endif
     }
 }
 
