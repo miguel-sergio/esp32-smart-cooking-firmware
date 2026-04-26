@@ -3,12 +3,14 @@
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 
 #include "bme280.h"
 #include "app_types.h"
 #include "control_task.h"
 #include "thermal_task.h"
 #include "motor_task.h"
+#include "comms_task.h"
 
 static const char *TAG = "main";
 
@@ -43,6 +45,14 @@ static QueueHandle_t s_thermal_q; /* control_task → thermal_task            */
 
 /* ── app_main ─────────────────────────────────────────────────────────── */
 void app_main(void) {
+    /* ── NVS (required by Wi-Fi) ────────────────────────────────────────── */
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_ret);
+
     /* ── I2C bus ─────────────────────────────────────────────────── */
     i2c_master_bus_config_t bus_cfg = {
         .i2c_port          = I2C_NUM_0,
@@ -107,5 +117,12 @@ void app_main(void) {
     };
     motor_task_start(&motor_cfg);
 
-    ESP_LOGI(TAG, "Firmware started — control_task + thermal_task + motor_task running");
+    /* ── Start comms_task ────────────────────────────────────────── */
+    comms_task_config_t comms_cfg = {
+        .state_q = s_state_q,
+        .cmd_q   = s_cmd_q,
+    };
+    comms_task_start(&comms_cfg);
+
+    ESP_LOGI(TAG, "Firmware started — control_task + thermal_task + motor_task + comms_task running");
 }
