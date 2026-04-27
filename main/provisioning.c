@@ -1,4 +1,5 @@
 #include "provisioning.h"
+#include "provisioning_security.h"
 
 #include <string.h>
 
@@ -151,11 +152,18 @@ static void blufi_event_callback(esp_blufi_cb_event_t event,
 
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         ESP_LOGI(TAG, "Blufi: BLE client disconnected");
-        /* If credentials were not yet received, resume advertising so the
-         * user can reconnect without needing to reboot the device. */
-        if (!s_got_ssid || !s_got_pass) {
-            esp_ble_gap_start_advertising(&s_adv_params);
-            ESP_LOGI(TAG, "BLE advertising restarted — waiting for credentials");
+        /* Resume advertising only if provisioning is not already complete.
+         * After credentials are saved the EventGroup bit is set, so we skip
+         * the restart to avoid spurious advertising during teardown. */
+        if ((!s_got_ssid || !s_got_pass) &&
+            (s_prov_eg == NULL ||
+             !(xEventGroupGetBits(s_prov_eg) & BLUFI_PROVISIONED_BIT))) {
+            esp_err_t err = esp_ble_gap_start_advertising(&s_adv_params);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "BLE restart advertising failed: %s", esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "BLE advertising restarted — waiting for credentials");
+            }
         }
         break;
 
@@ -211,15 +219,10 @@ static void blufi_event_callback(esp_blufi_cb_event_t event,
 
 static esp_blufi_callbacks_t s_blufi_callbacks = {
     .event_cb               = blufi_event_callback,
-    /* Security callbacks are NULL: credentials are transmitted without
-     * BLE-layer encryption. Acceptable for a provisioning window where
-     * physical proximity is required. Production hardening: add DH
-     * key-exchange + AES-128 using esp_blufi_dh_negotiate_data_handler
-     * and esp_blufi_aes_encrypt/decrypt from the ESP-IDF security layer. */
-    .negotiate_data_handler = NULL,
-    .encrypt_func           = NULL,
-    .decrypt_func           = NULL,
-    .checksum_func          = NULL,
+    .negotiate_data_handler = blufi_dh_negotiate_data_handler,
+    .encrypt_func           = blufi_aes_encrypt,
+    .decrypt_func           = blufi_aes_decrypt,
+    .checksum_func          = blufi_crc_checksum,
 };
 
 /* ── BLE stack lifecycle ─────────────────────────────────────────────────── */
@@ -242,6 +245,7 @@ static void ble_init_and_start_blufi(void) {
     esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE,
                                    &iocap, sizeof(iocap));
 
+    ESP_ERROR_CHECK(blufi_security_init());
     ESP_ERROR_CHECK(esp_blufi_register_callbacks(&s_blufi_callbacks));
     ESP_ERROR_CHECK(esp_blufi_profile_init());
 
@@ -254,6 +258,7 @@ static void ble_teardown(void) {
     vTaskDelay(pdMS_TO_TICKS(200u));
 
     esp_blufi_profile_deinit();
+    blufi_security_deinit();
 
     ESP_ERROR_CHECK(esp_bluedroid_disable());
     ESP_ERROR_CHECK(esp_bluedroid_deinit());
