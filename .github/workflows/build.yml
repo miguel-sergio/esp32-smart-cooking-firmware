@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: idf.py build (ESP32)
@@ -22,3 +26,23 @@ jobs:
         run: |
           . /opt/esp/idf/export.sh
           idf.py build
+
+      - name: Show firmware size
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py size
+          idf.py size-components
+
+      - name: Upload firmware artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+            build/bootloader/*.bin
+            build/partition_table/*.bin
+            build/compile_commands.json
+            sdkconfig
+          if-no-files-found: error

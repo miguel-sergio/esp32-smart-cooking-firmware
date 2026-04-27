@@ -275,6 +275,8 @@ void blufi_security_deinit(void)
  *
  * After this exchange all Blufi payload frames are AES-256-CTR encrypted.
  */
+// cppcheck-suppress constParameterPointer -- signature fixed by esp_blufi_callbacks_t
+// NOLINTNEXTLINE(readability-non-const-parameter) -- signature fixed by esp_blufi_callbacks_t
 void blufi_dh_negotiate_data_handler(uint8_t *data, int len,
                                      uint8_t **output_data, int *output_len,
                                      bool *need_free)

@@ -28,7 +28,7 @@ static const char *TAG = "thermal";
 #define WDT_CHUNK_TICKS     pdMS_TO_TICKS((CONFIG_ESP_TASK_WDT_TIMEOUT_S * 1000u) / 2u)
 
 /* BME280 valid output ranges */
-#define TEMP_MIN_DEG       -40.0f
+#define TEMP_MIN_DEG       (-40.0f)
 #define TEMP_MAX_DEG        85.0f
 #define HUM_MIN_PCT          0.0f
 #define HUM_MAX_PCT        100.0f

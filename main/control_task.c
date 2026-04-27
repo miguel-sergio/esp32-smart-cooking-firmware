@@ -200,7 +200,7 @@ static void control_task(void *arg) {
     (void)arg;
 
     cooking_state_t          state        = COOKING_STATE_IDLE;
-    cooking_state_t          prev_state   = (cooking_state_t)-1;
+    cooking_state_t          prev_state   = COOKING_STATE_INVALID;
     fault_type_t             active_fault = FAULT_NONE;
     const cooking_profile_t *profile      = &s_profiles[0];
 
@@ -374,6 +374,10 @@ static void control_task(void *arg) {
                 send_motor_cmd(0, true);       /* brake = true */
                 ESP_LOGE(TAG, "Fault: %s", fault_name(active_fault));
                 break;
+            case COOKING_STATE_INVALID:
+                /* No actions defined for INVALID; this state should never be set,
+                 * but if it does, just skip actions to avoid unintended commands. */
+                break;
             }
 
             prev_state = state;
@@ -500,11 +504,16 @@ static void control_task(void *arg) {
                 ESP_LOGW(TAG, "CMD: %s rejected — not valid in ERROR", cmd_name(cmd.type));
             }
             break;
+
+        case COOKING_STATE_INVALID:
+            /* No actions defined for INVALID; this state should never be set,
+            * but if it does, just skip actions to avoid unintended commands. */
+            break;
         }
 
         /* ── 5. Publish current state to comms_task ─────────────────────── */
         /* Derive current motor duty from profile when in COOKING, else 0. */
-        last_motor_duty = (state == COOKING_STATE_COOKING) ? profile->motor_duty_pct : 0;
+        last_motor_duty = (int8_t)((state == COOKING_STATE_COOKING) ? profile->motor_duty_pct : 0);
         publish_state(state, last_temp, last_humidity, active_fault,
                       (uint8_t)(profile - s_profiles), last_motor_duty);
 

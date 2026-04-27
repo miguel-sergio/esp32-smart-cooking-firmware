@@ -1,0 +1,105 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cppcheck:
+    name: cppcheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --std=c11 \
+            --error-exitcode=1 \
+            --enable=warning,style,performance,portability \
+            --check-level=exhaustive \
+            --suppress=missingIncludeSystem \
+            --inline-suppr \
+            -I components/app_types \
+            main/ \
+            components/
+
+  clang-tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            build
+            ~/.cache
+            /opt/esp/tools/esp-clang
+          key: ${{ runner.os }}-idf-clang-${{ hashFiles('sdkconfig.defaults', 'CMakeLists.txt', 'main/**', 'components/**', '.clang-tidy') }}
+          restore-keys: |
+            ${{ runner.os }}-idf-clang-
+
+      - name: Install esp-clang toolchain
+        run: |
+          . /opt/esp/idf/export.sh
+          idf_tools.py install esp-clang
+          . /opt/esp/idf/export.sh
+
+      - name: Build with clang toolchain
+        run: |
+          . /opt/esp/idf/export.sh
+          export IDF_TOOLCHAIN=clang
+          idf.py build
+
+      - name: Filter compile_commands.json
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          project_root = Path.cwd().resolve()
+          db_path = project_root / "build" / "compile_commands.json"
+
+          db = json.loads(db_path.read_text())
+          filtered = []
+
+          for entry in db:
+              file_path = Path(entry["file"]).resolve()
+
+              try:
+                  rel = file_path.relative_to(project_root)
+              except ValueError:
+                  continue
+
+              if rel.parts[0] in ("main", "components"):
+                  if rel.suffix in (".c", ".cpp", ".cc", ".cxx"):
+                      filtered.append(entry)
+
+          db_path.write_text(json.dumps(filtered, indent=2))
+          print(f"{len(filtered)} project source entries")
+          PY
+
+      - name: Run clang-tidy
+        run: |
+          . /opt/esp/idf/export.sh
+          run-clang-tidy -p build -j $(nproc) -warnings-as-errors='*'
