@@ -215,8 +215,14 @@ static void control_task(void *arg) {
                 size_t            len = sizeof(cooking_profile_t);
                 cooking_profile_t tmp;
                 if (nvs_get_blob(nvs, key, &tmp, &len) == ESP_ERR_NVS_NOT_FOUND) {
-                    ESP_ERROR_CHECK(nvs_set_blob(nvs, key, &s_profiles[i],
-                                                sizeof(cooking_profile_t)));
+                    esp_err_t set_err = nvs_set_blob(nvs, key, &s_profiles[i],
+                                                     sizeof(cooking_profile_t));
+                    if (set_err != ESP_OK) {
+                        ESP_LOGW(TAG, "NVS: failed to seed %s (%s) — persistence disabled",
+                                 key, esp_err_to_name(set_err));
+                        nvs_ok = false;
+                        break;
+                    }
                     ESP_LOGI(TAG, "NVS: seeded %s", key);
                     dirty = true;
                 }
@@ -226,9 +232,17 @@ static void control_task(void *arg) {
             uint8_t pid = 0u;
             err = nvs_get_u8(nvs, NVS_KEY_ACTIVE_PROF, &pid);
             if (err == ESP_ERR_NVS_NOT_FOUND) {
-                ESP_ERROR_CHECK(nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, 0u));
-                dirty = true;
-                ESP_LOGI(TAG, "NVS: active_profile not found — default 0 written");
+                if (nvs_ok) {
+                    esp_err_t set_err = nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, 0u);
+                    if (set_err != ESP_OK) {
+                        ESP_LOGW(TAG, "NVS: failed to write active_profile default (%s) — persistence disabled",
+                                 esp_err_to_name(set_err));
+                        nvs_ok = false;
+                    } else {
+                        dirty = true;
+                        ESP_LOGI(TAG, "NVS: active_profile not found — default 0 written");
+                    }
+                }
             } else if (err == ESP_OK) {
                 if (pid >= (uint8_t)ARRAY_SIZE(s_profiles)) { pid = 0u; }
                 ESP_LOGI(TAG, "NVS: active_profile = %u", (unsigned)pid);
@@ -238,8 +252,13 @@ static void control_task(void *arg) {
                 pid = 0u;
             }
 
-            if (dirty) {
-                ESP_ERROR_CHECK(nvs_commit(nvs));
+            if (nvs_ok && dirty) {
+                esp_err_t commit_err = nvs_commit(nvs);
+                if (commit_err != ESP_OK) {
+                    ESP_LOGW(TAG, "NVS: commit failed (%s) — persistence may be incomplete",
+                             esp_err_to_name(commit_err));
+                    nvs_ok = false;
+                }
             }
 
             profile = &s_profiles[pid];
