@@ -231,8 +231,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             esp_ota_img_states_t   ota_state;
             if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
                 ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-                esp_ota_mark_app_valid_cancel_rollback();
-                ESP_LOGI(TAG, "OTA: new firmware validated — rollback cancelled");
+                esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+                if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "OTA: new firmware validated — rollback cancelled");
+                } else {
+                    ESP_LOGE(TAG, "OTA: failed to validate new firmware: %s", esp_err_to_name(err));
+                }
             }
         }
         break;
