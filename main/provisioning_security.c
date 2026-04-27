@@ -711,5 +711,9 @@ int blufi_aes_decrypt(uint8_t iv8, uint8_t *crypt_data, int crypt_len)
 uint16_t blufi_crc_checksum(uint8_t iv8, uint8_t *data, int len)
 {
     (void)iv8;  /* Blufi passes iv8 but the standard example ignores it. */
+
+    if (data == NULL || len <= 0) {
+        return 0u;
+    }
     return esp_crc16_be(0u, data, (uint32_t)len);
 }
