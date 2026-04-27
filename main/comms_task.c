@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#include "mbedtls/platform_util.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -96,6 +98,11 @@ static bool wifi_init(void) {
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+
+    /* Zeroize password copies from RAM now that the driver has consumed them */
+    mbedtls_platform_zeroize(pass, PROV_PASS_MAX_LEN);
+    mbedtls_platform_zeroize(wifi_cfg.sta.password, sizeof(wifi_cfg.sta.password));
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "Wi-Fi connecting to SSID: \"%s\"", ssid);

@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "mbedtls/platform_util.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -293,6 +295,11 @@ static void blufi_event_callback(esp_blufi_cb_event_t event,
         } else {
             ESP_LOGE(TAG, "NVS save failed — provisioning remains active");
         }
+
+        /* Zeroize credential RAM regardless of outcome — reduces exposure in
+         * core dumps and through stray log calls. */
+        mbedtls_platform_zeroize(s_pass, sizeof(s_pass));
+        mbedtls_platform_zeroize(s_ssid, sizeof(s_ssid));
     }
 }
 
