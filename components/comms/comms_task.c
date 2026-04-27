@@ -52,6 +52,18 @@ static comms_task_config_t s_cfg;
 static EventGroupHandle_t  s_wifi_eg;
 static uint8_t             s_retry_count = 0u;
 
+/* Set to true once wifi_init() returns successfully.  Used by the Wi-Fi
+ * event handler to distinguish boot-time connection failures (handled by
+ * wifi_init via WIFI_FAIL_BIT) from runtime disconnections (no one is
+ * waiting on the EventGroup — must restart to recover). */
+static bool                s_wifi_ready  = false;
+
+/* Set by wifi_event_handler when max retries are exhausted at runtime.
+ * Processed by the comms_task loop: deferred until state is IDLE/DONE/ERROR
+ * so actuators are in a defined safe state before the restart.  If a cycle
+ * is active, an ESTOP is posted first to drive control_task to ERROR. */
+static volatile bool       s_restart_pending = false;
+
 /* Pending OTA URL — set when URL arrives during an active cooking cycle.
  * Dispatched to ota_url_q once state reaches IDLE / DONE / ERROR.
  * Protected by s_ota_mutex (written from MQTT task, read from comms_task). */
@@ -71,9 +83,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             s_retry_count++;
             ESP_LOGW(TAG, "Wi-Fi disconnected — retry %u/%u", s_retry_count, WIFI_MAX_RETRIES);
             esp_wifi_connect();
-        } else {
+        } else if (!s_wifi_ready) {
+            /* Boot phase: signal wifi_init() to trigger re-provisioning (FR-07) */
             xEventGroupSetBits(s_wifi_eg, WIFI_FAIL_BIT);
-            ESP_LOGE(TAG, "Wi-Fi: max retries reached");
+            ESP_LOGE(TAG, "Wi-Fi: max retries reached at boot — entering re-provisioning");
+        } else {
+            /* Runtime: set a flag; comms_task loop handles the restart once the
+             * cooking cycle is in a safe state (IDLE/DONE/ERROR).  Calling
+             * esp_restart() directly here could interrupt an active cycle and
+             * leave actuator GPIOs in an undefined state during reset. */
+            ESP_LOGE(TAG, "Wi-Fi: max retries reached at runtime — restart deferred");
+            s_restart_pending = true;
         }
 
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -326,6 +346,11 @@ static void comms_task(void *arg) {
 
     /* ── Wi-Fi + MQTT init (inside task, before loop) ───────────────────── */
     bool wifi_ok = wifi_init();
+    if (wifi_ok) {
+        /* Mark runtime phase: from here, exhausted retries trigger esp_restart()
+         * instead of signalling WIFI_FAIL_BIT (see wifi_event_handler). */
+        s_wifi_ready = true;
+    }
 
     esp_mqtt_client_handle_t mqtt_client = NULL;
     if (wifi_ok) {
@@ -364,6 +389,28 @@ static void comms_task(void *arg) {
 
         if (!have_state || mqtt_client == NULL) {
             continue;
+        }
+
+        /* ── Deferred restart: Wi-Fi max-retry recovery ─────────────────── */
+        /* Restart only when actuators are in a defined safe state.          */
+        if (s_restart_pending) {
+            cooking_state_t cs = last_state.state;
+            if (cs == COOKING_STATE_IDLE ||
+                cs == COOKING_STATE_DONE  ||
+                cs == COOKING_STATE_ERROR) {
+                ESP_LOGI(TAG, "Wi-Fi restart: state=%s — restarting now",
+                         state_name(cs));
+                esp_restart();
+                /* not reached */
+            }
+            /* PREHEAT / COOKING: post ESTOP so control_task drives heater and
+             * motor off before we restart.  The loop continues; on the next
+             * iteration the state will be ERROR and we fall into the branch
+             * above.  ESTOP is idempotent — repeated posts are harmless. */
+            mqtt_cmd_t estop = { .type = CMD_ESTOP, .profile_id = 0u };
+            xQueueSend(s_cfg.cmd_q, &estop, 0);
+            ESP_LOGW(TAG, "Wi-Fi restart: cycle active (%s) — ESTOP posted, waiting",
+                     state_name(cs));
         }
 
         /* ── OTA deferral: dispatch pending URL when cycle is not active ── */
