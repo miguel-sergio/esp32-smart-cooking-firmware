@@ -52,31 +52,70 @@ static bool nvs_has_credentials(void) {
             pass_err == ESP_OK && pass_len > 1u);
 }
 
-static void nvs_save_credentials(const char *ssid, const char *pass) {
+static bool nvs_save_credentials(const char *ssid, const char *pass) {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(PROV_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS open failed: %s", esp_err_to_name(err));
-        return;
+        return false;
     }
-    nvs_set_str(nvs, PROV_NVS_KEY_SSID, ssid);
-    nvs_set_str(nvs, PROV_NVS_KEY_PASS, pass);
-    nvs_commit(nvs);
+
+    err = nvs_set_str(nvs, PROV_NVS_KEY_SSID, ssid);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS write SSID failed: %s", esp_err_to_name(err));
+        nvs_close(nvs);
+        return false;
+    }
+
+    err = nvs_set_str(nvs, PROV_NVS_KEY_PASS, pass);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS write password failed: %s", esp_err_to_name(err));
+        nvs_close(nvs);
+        return false;
+    }
+
+    err = nvs_commit(nvs);
     nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
     ESP_LOGI(TAG, "Credentials saved to NVS (SSID length: %u)", (unsigned)strlen(ssid));
+    return true;
 }
 
-static void nvs_erase_credentials(void) {
+static bool nvs_erase_credentials(void) {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(PROV_NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
-        return;
+        ESP_LOGE(TAG, "NVS open for erase failed: %s", esp_err_to_name(err));
+        return false;
     }
-    nvs_erase_key(nvs, PROV_NVS_KEY_SSID);
-    nvs_erase_key(nvs, PROV_NVS_KEY_PASS);
-    nvs_commit(nvs);
+
+    err = nvs_erase_key(nvs, PROV_NVS_KEY_SSID);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "NVS erase SSID failed: %s", esp_err_to_name(err));
+        nvs_close(nvs);
+        return false;
+    }
+
+    err = nvs_erase_key(nvs, PROV_NVS_KEY_PASS);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "NVS erase password failed: %s", esp_err_to_name(err));
+        nvs_close(nvs);
+        return false;
+    }
+
+    err = nvs_commit(nvs);
     nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit after erase failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
     ESP_LOGI(TAG, "NVS credentials erased");
+    return true;
 }
 
 /* ── BLE advertising ────────────────────────────────────────────────────── */
@@ -111,16 +150,26 @@ static esp_ble_adv_params_t s_adv_params = {
 static void gap_event_handler(esp_gap_ble_cb_event_t event,
                               esp_ble_gap_cb_param_t *param) {
     switch (event) {
-    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT:
-        esp_ble_gap_start_advertising(&s_adv_params);
-        ESP_LOGI(TAG, "BLE advertising started");
+    case ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT: {
+        esp_err_t err = esp_ble_gap_start_advertising(&s_adv_params);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "BLE start advertising failed: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "BLE advertising started");
+        }
         break;
+    }
 
-    case ESP_GAP_BLE_SEC_REQ_EVT:
+    case ESP_GAP_BLE_SEC_REQ_EVT: {
         /* Phone requested security — reply with no-bond accept so the
          * SMP exchange completes immediately instead of timing out. */
-        esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
+        esp_err_t err = esp_ble_gap_security_rsp(
+            param->ble_security.ble_req.bd_addr, true);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "BLE security response failed: %s", esp_err_to_name(err));
+        }
         break;
+    }
 
     case ESP_GAP_BLE_AUTH_CMPL_EVT:
         if (!param->ble_security.auth_cmpl.success) {
@@ -139,11 +188,19 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
 static void blufi_event_callback(esp_blufi_cb_event_t event,
                                  esp_blufi_cb_param_t *param) {
     switch (event) {
-    case ESP_BLUFI_EVENT_INIT_FINISH:
-        esp_ble_gap_set_device_name(PROV_BLE_DEVICE_NAME);
-        esp_ble_gap_config_adv_data(&s_adv_data);
-        ESP_LOGI(TAG, "Blufi init complete — starting BLE advertising");
+    case ESP_BLUFI_EVENT_INIT_FINISH: {
+        esp_err_t err = esp_ble_gap_set_device_name(PROV_BLE_DEVICE_NAME);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "BLE set device name failed: %s", esp_err_to_name(err));
+        }
+        err = esp_ble_gap_config_adv_data(&s_adv_data);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "BLE config adv data failed: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "Blufi init complete — starting BLE advertising");
+        }
         break;
+    }
 
     case ESP_BLUFI_EVENT_BLE_CONNECT:
         ESP_LOGI(TAG, "Blufi: BLE client connected");
@@ -167,12 +224,17 @@ static void blufi_event_callback(esp_blufi_cb_event_t event,
         }
         break;
 
-    case ESP_BLUFI_EVENT_GET_WIFI_STATUS:
+    case ESP_BLUFI_EVENT_GET_WIFI_STATUS: {
         /* Device is in provisioning mode — not connected to any AP yet.
          * Respond with CONN_FAIL so the app shows the credential form. */
-        esp_blufi_send_wifi_conn_report(WIFI_MODE_NULL,
-                                        ESP_BLUFI_STA_CONN_FAIL, 0, NULL);
+        esp_err_t err = esp_blufi_send_wifi_conn_report(WIFI_MODE_NULL,
+                                                        ESP_BLUFI_STA_CONN_FAIL,
+                                                        0, NULL);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Blufi send wifi status failed: %s", esp_err_to_name(err));
+        }
         break;
+    }
 
     case ESP_BLUFI_EVENT_RECV_STA_SSID: {
         /* Blufi sends SSID as raw bytes without null terminator — use
@@ -208,12 +270,17 @@ static void blufi_event_callback(esp_blufi_cb_event_t event,
         break;
     }
 
-    /* Both credentials received — save once and signal the waiting task */
+    /* Both credentials received — save once and signal the waiting task.
+     * If the NVS write fails, reset the flags so the user can reconnect
+     * and re-send credentials (advertising resumes on BLE_DISCONNECT). */
     if (s_got_ssid && s_got_pass && s_prov_eg != NULL) {
         s_got_ssid = false;
         s_got_pass = false;
-        nvs_save_credentials(s_ssid, s_pass);
-        xEventGroupSetBits(s_prov_eg, BLUFI_PROVISIONED_BIT);
+        if (nvs_save_credentials(s_ssid, s_pass)) {
+            xEventGroupSetBits(s_prov_eg, BLUFI_PROVISIONED_BIT);
+        } else {
+            ESP_LOGE(TAG, "NVS save failed — provisioning remains active");
+        }
     }
 }
 
@@ -240,10 +307,10 @@ static void ble_init_and_start_blufi(void) {
      * the mobile app tries to pair before sending credentials. */
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_NO_BOND;
     esp_ble_io_cap_t   iocap    = ESP_IO_CAP_NONE;
-    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE,
-                                   &auth_req, sizeof(auth_req));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE,
-                                   &iocap, sizeof(iocap));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE,
+                                                   &auth_req, sizeof(auth_req)));
+    ESP_ERROR_CHECK(esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE,
+                                                   &iocap, sizeof(iocap)));
 
     ESP_ERROR_CHECK(blufi_security_init());
     ESP_ERROR_CHECK(esp_blufi_register_callbacks(&s_blufi_callbacks));
@@ -327,7 +394,9 @@ void provisioning_on_wifi_failure(void) {
     ESP_LOGE(TAG, "Wi-Fi failed after %u attempts — erasing credentials, "
                   "restarting into Blufi provisioning mode",
              PROV_WIFI_MAX_RETRIES);
-    nvs_erase_credentials();
+    if (!nvs_erase_credentials()) {
+        ESP_LOGE(TAG, "NVS erase failed — restarting anyway");
+    }
     esp_restart();
     /* not reached */
 }
