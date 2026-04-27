@@ -127,9 +127,9 @@ stateDiagram-v2
 | OVERTEMP | Temperature exceeds safety limit |
 | SENSOR_TIMEOUT | No valid reading for more than 3 seconds |
 | ESTOP | Emergency stop received via MQTT |
-| Heater failure *(CR-001)* | Temperature remains more than 1 °C below the cooking target for 2 consecutive minutes at any point during the COOKING phase; the window resets if temperature recovers |
+| Heater failure *(CR-001)* | Temperature remains more than 1 °C below the active phase target for 2 consecutive minutes during PREHEAT or COOKING; the window resets if temperature recovers |
 
-> **CR-001** — *Change request raised 2026-04-26.* A heater-failure fault condition was added to the fault detection subsystem. The state controller monitors temperature continuously during the COOKING phase using a sliding consolidation window: if the measured temperature stays more than 1 °C below the cooking target for 2 consecutive minutes, the system transitions to ERROR. A transient dip followed by recovery resets the window. Rationale: the fault must detect both a heater that never starts and one that fails or degrades mid-cycle.
+> **CR-001** — *Change request raised 2026-04-26.* A heater-failure fault condition was added to the fault detection subsystem. The state controller monitors temperature continuously during both the PREHEAT and COOKING phases using a sliding consolidation window: if the measured temperature stays more than 1 °C below the active phase target for 2 consecutive minutes, the system transitions to ERROR. A transient dip followed by recovery resets the window. Rationale: the fault must detect both a heater that never starts and one that fails or degrades mid-cycle.
 **Traces:** FR-01, FR-05, NFR-01
 
 ---
