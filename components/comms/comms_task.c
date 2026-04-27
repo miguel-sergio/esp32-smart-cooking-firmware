@@ -16,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
 #include "esp_wifi.h"
@@ -52,9 +53,11 @@ static EventGroupHandle_t  s_wifi_eg;
 static uint8_t             s_retry_count = 0u;
 
 /* Pending OTA URL — set when URL arrives during an active cooking cycle.
- * Dispatched to ota_url_q once state reaches IDLE / DONE / ERROR. */
-static char  s_pending_ota_url[OTA_URL_MAX_LEN];
-static bool  s_ota_pending = false;
+ * Dispatched to ota_url_q once state reaches IDLE / DONE / ERROR.
+ * Protected by s_ota_mutex (written from MQTT task, read from comms_task). */
+static char              s_pending_ota_url[OTA_URL_MAX_LEN];
+static bool              s_ota_pending = false;
+static SemaphoreHandle_t s_ota_mutex   = NULL;
 
 /* ── Wi-Fi event handler ────────────────────────────────────────────────── */
 
@@ -256,10 +259,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 int copy_len = ev->data_len < (int)(OTA_URL_MAX_LEN - 1u)
                                ? ev->data_len
                                : (int)(OTA_URL_MAX_LEN - 1u);
+                xSemaphoreTake(s_ota_mutex, portMAX_DELAY);
                 memcpy(s_pending_ota_url, ev->data, (size_t)copy_len);
                 s_pending_ota_url[copy_len] = '\0';
                 s_ota_pending = true;
-                ESP_LOGI(TAG, "OTA: URL queued — %s", s_pending_ota_url);
+                xSemaphoreGive(s_ota_mutex);
+                ESP_LOGI(TAG, "OTA: URL queued — %.*s", copy_len, ev->data);
             }
         }
         break;
@@ -362,22 +367,36 @@ static void comms_task(void *arg) {
         }
 
         /* ── OTA deferral: dispatch pending URL when cycle is not active ── */
-        if (s_ota_pending) {
-            cooking_state_t cs = last_state.state;
-            if (cs == COOKING_STATE_IDLE ||
-                cs == COOKING_STATE_DONE  ||
-                cs == COOKING_STATE_ERROR) {
-                configASSERT(s_cfg.ota_url_q != NULL);
-                BaseType_t send_ok = xQueueSend(s_cfg.ota_url_q, s_pending_ota_url, 0);
-                if (send_ok == pdTRUE) {
-                    s_ota_pending = false;
-                    ESP_LOGI(TAG, "OTA: URL dispatched to ota_task");
+        {
+            char  url_copy[OTA_URL_MAX_LEN];
+            bool  pending = false;
+
+            xSemaphoreTake(s_ota_mutex, portMAX_DELAY);
+            if (s_ota_pending) {
+                pending = true;
+                strlcpy(url_copy, s_pending_ota_url, OTA_URL_MAX_LEN);
+            }
+            xSemaphoreGive(s_ota_mutex);
+
+            if (pending) {
+                cooking_state_t cs = last_state.state;
+                if (cs == COOKING_STATE_IDLE ||
+                    cs == COOKING_STATE_DONE  ||
+                    cs == COOKING_STATE_ERROR) {
+                    configASSERT(s_cfg.ota_url_q != NULL);
+                    BaseType_t send_ok = xQueueSend(s_cfg.ota_url_q, url_copy, 0);
+                    if (send_ok == pdTRUE) {
+                        xSemaphoreTake(s_ota_mutex, portMAX_DELAY);
+                        s_ota_pending = false;
+                        xSemaphoreGive(s_ota_mutex);
+                        ESP_LOGI(TAG, "OTA: URL dispatched to ota_task");
+                    } else {
+                        ESP_LOGW(TAG, "OTA: deferred URL dispatch failed (queue full?)");
+                    }
                 } else {
-                    ESP_LOGW(TAG, "OTA: deferred URL dispatch failed (queue full?)");
+                    ESP_LOGD(TAG, "OTA: deferred — cycle active (%s)",
+                             state_name(last_state.state));
                 }
-            } else {
-                ESP_LOGD(TAG, "OTA: deferred — cycle active (%s)",
-                         state_name(last_state.state));
             }
         }
 
@@ -438,6 +457,9 @@ void comms_task_start(const comms_task_config_t *cfg) {
     configASSERT(cfg->state_q != NULL);
     configASSERT(cfg->cmd_q != NULL);
     s_cfg = *cfg;
+
+    s_ota_mutex = xSemaphoreCreateMutex();
+    configASSERT(s_ota_mutex != NULL);
 
     BaseType_t ret = xTaskCreatePinnedToCore(
         comms_task,
