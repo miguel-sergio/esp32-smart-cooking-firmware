@@ -39,8 +39,8 @@ menu "Smart Cooking App"
         bool "Enable fault injection overrides for testing"
         default n
         help
-            Lowers Profile 0 safety_cutoff to 24 °C (triggerable at ambient)
-            and reduces HEAT_RISE_MS to 15 s so FAULT_OVERTEMP and
+            Lowers Profile 0 safety_cutoff to 30 °C and reduces
+            HEAT_RISE_MS to 15 s so FAULT_OVERTEMP and
             FAULT_HEATER_FAIL can be tested without real heating hardware.
             Must never be enabled in production builds.
 
