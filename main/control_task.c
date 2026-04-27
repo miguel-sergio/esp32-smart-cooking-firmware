@@ -187,7 +187,8 @@ static void control_task(void *arg) {
                 break;
 
             case COOKING_STATE_PREHEAT:
-                last_temp_ms = tick;           /* reset timeout grace period */
+                last_temp_ms          = tick;  /* reset timeout grace period */
+                below_target_since_ms = 0u;
                 send_thermal_cmd(true, profile->preheat_target);
                 send_motor_cmd(0, false);
                 break;
@@ -238,6 +239,20 @@ static void control_task(void *arg) {
                 active_fault = FAULT_OVERTEMP;
                 state        = COOKING_STATE_ERROR;
                 break;
+            }
+            /* Fault: temperature below preheat target for 2 consecutive minutes.
+             * The consolidation window resets whenever temperature recovers.
+             * This detects heater failure at any point during the preheat cycle. */
+            if (last_temp < (profile->preheat_target - 1.0f)) {
+                if (below_target_since_ms == 0u) {
+                    below_target_since_ms = tick;   /* start consolidation window */
+                } else if ((tick - below_target_since_ms) > HEAT_RISE_MS) {
+                    active_fault = FAULT_HEATER_FAIL;
+                    state        = COOKING_STATE_ERROR;
+                    break;
+                }
+            } else {
+                below_target_since_ms = 0u;
             }
             /* Operator abort */
             if (got_cmd && cmd.type == CMD_STOP) {
