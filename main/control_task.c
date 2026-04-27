@@ -118,6 +118,25 @@ static void send_motor_cmd(int8_t duty_pct, bool brake) {
     }
 }
 
+/**
+ * Consolidation helper: returns true when @p last_temp has been more than
+ * 1 °C below @p target for HEAT_RISE_MS consecutive milliseconds.
+ * Resets the window whenever temperature recovers above the threshold.
+ */
+static bool check_heater_fail(float last_temp, float target, uint32_t tick,
+                               uint32_t *below_target_since_ms) {
+    if (last_temp < (target - 1.0f)) {
+        if (*below_target_since_ms == 0u) {
+            *below_target_since_ms = tick;   /* start consolidation window */
+        } else if ((tick - *below_target_since_ms) >= HEAT_RISE_MS) {
+            return true;
+        }
+    } else {
+        *below_target_since_ms = 0u;         /* recovered — reset window */
+    }
+    return false;
+}
+
 static void publish_state(cooking_state_t state, float temp, fault_type_t fault) {
     if (s_cfg.state_q == NULL) {
         return;
@@ -243,16 +262,11 @@ static void control_task(void *arg) {
             /* Fault: temperature below preheat target for 2 consecutive minutes.
              * The consolidation window resets whenever temperature recovers.
              * This detects heater failure at any point during the preheat cycle. */
-            if (last_temp < (profile->preheat_target - 1.0f)) {
-                if (below_target_since_ms == 0u) {
-                    below_target_since_ms = tick;   /* start consolidation window */
-                } else if ((tick - below_target_since_ms) >= HEAT_RISE_MS) {
-                    active_fault = FAULT_HEATER_FAIL;
-                    state        = COOKING_STATE_ERROR;
-                    break;
-                }
-            } else {
-                below_target_since_ms = 0u;
+            if (check_heater_fail(last_temp, profile->preheat_target, tick,
+                                  &below_target_since_ms)) {
+                active_fault = FAULT_HEATER_FAIL;
+                state        = COOKING_STATE_ERROR;
+                break;
             }
             /* Operator abort */
             if (got_cmd && cmd.type == CMD_STOP) {
@@ -281,16 +295,11 @@ static void control_task(void *arg) {
             /* Fault: temperature below cook target for 2 consecutive minutes.
              * The consolidation window resets whenever temperature recovers.
              * This detects heater failure at any point during the cook cycle. */
-            if (last_temp < (profile->cook_target - 1.0f)) {
-                if (below_target_since_ms == 0u) {
-                    below_target_since_ms = tick;   /* start consolidation window */
-                } else if ((tick - below_target_since_ms) >= HEAT_RISE_MS) {
-                    active_fault = FAULT_HEATER_FAIL;
-                    state        = COOKING_STATE_ERROR;
-                    break;
-                }
-            } else {
-                below_target_since_ms = 0u;         /* recovered — reset window */
+            if (check_heater_fail(last_temp, profile->cook_target, tick,
+                                  &below_target_since_ms)) {
+                active_fault = FAULT_HEATER_FAIL;
+                state        = COOKING_STATE_ERROR;
+                break;
             }
             /* Operator abort */
             if (got_cmd && cmd.type == CMD_STOP) {
