@@ -128,6 +128,8 @@ static bool check_heater_fail(float last_temp, float target, uint32_t tick,
     if (last_temp < (target - 1.0f)) {
         if (*below_target_since_ms == 0u) {
             *below_target_since_ms = tick;   /* start consolidation window */
+            ESP_LOGW(TAG, "heater-fail window opened: T=%.1f°C target=%.1f°C — 2 min consolidation begins",
+                     last_temp, target);
         } else if ((tick - *below_target_since_ms) >= HEAT_RISE_MS) {
             return true;
         }
