@@ -367,9 +367,13 @@ static void comms_task(void *arg) {
             if (cs == COOKING_STATE_IDLE ||
                 cs == COOKING_STATE_DONE  ||
                 cs == COOKING_STATE_ERROR) {
-                if (xQueueSend(s_cfg.ota_url_q, s_pending_ota_url, 0) == pdTRUE) {
+                configASSERT(s_cfg.ota_url_q != NULL);
+                BaseType_t send_ok = xQueueSend(s_cfg.ota_url_q, s_pending_ota_url, 0);
+                if (send_ok == pdTRUE) {
                     s_ota_pending = false;
                     ESP_LOGI(TAG, "OTA: URL dispatched to ota_task");
+                } else {
+                    ESP_LOGW(TAG, "OTA: deferred URL dispatch failed (queue full?)");
                 }
             } else {
                 ESP_LOGD(TAG, "OTA: deferred — cycle active (%s)",
