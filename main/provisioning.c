@@ -270,13 +270,25 @@ static void blufi_event_callback(esp_blufi_cb_event_t event,
         break;
     }
 
-    /* Both credentials received — save once and signal the waiting task.
-     * If the NVS write fails, reset the flags so the user can reconnect
+    /* Both credentials received — validate, save, and signal the waiting
+     * task.  On any failure reset the flags so the mobile app can reconnect
      * and re-send credentials (advertising resumes on BLE_DISCONNECT). */
     if (s_got_ssid && s_got_pass && s_prov_eg != NULL) {
         s_got_ssid = false;
         s_got_pass = false;
-        if (nvs_save_credentials(s_ssid, s_pass)) {
+
+        size_t ssid_len = strlen(s_ssid);
+        size_t pass_len = strlen(s_pass);
+
+        /* IEEE 802.11: SSID 1–32 chars; WPA2-PSK passphrase 8–63 chars. */
+        if (ssid_len < 1u || ssid_len > 32u) {
+            ESP_LOGE(TAG, "Invalid SSID length %u — must be 1-32 chars; "
+                          "provisioning remains active", (unsigned)ssid_len);
+        } else if (pass_len < 8u || pass_len > 63u) {
+            ESP_LOGE(TAG, "Invalid password length %u — WPA2-PSK requires "
+                          "8-63 chars; provisioning remains active",
+                     (unsigned)pass_len);
+        } else if (nvs_save_credentials(s_ssid, s_pass)) {
             xEventGroupSetBits(s_prov_eg, BLUFI_PROVISIONED_BIT);
         } else {
             ESP_LOGE(TAG, "NVS save failed — provisioning remains active");
