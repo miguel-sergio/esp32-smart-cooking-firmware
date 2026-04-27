@@ -1,6 +1,7 @@
 #include "comms_task.h"
 #include "ota_task.h"
 #include "app_types.h"
+#include "cooking_logic.h"
 #include "provisioning.h"
 
 #include <stdio.h>
@@ -395,9 +396,7 @@ static void comms_task(void *arg) {
         /* Restart only when actuators are in a defined safe state.          */
         if (s_restart_pending) {
             cooking_state_t cs = last_state.state;
-            if (cs == COOKING_STATE_IDLE ||
-                cs == COOKING_STATE_DONE  ||
-                cs == COOKING_STATE_ERROR) {
+            if (cooking_logic_ota_should_dispatch(cs)) {
                 ESP_LOGI(TAG, "Wi-Fi restart: state=%s — restarting now",
                          state_name(cs));
                 esp_restart();
@@ -427,9 +426,7 @@ static void comms_task(void *arg) {
 
             if (pending) {
                 cooking_state_t cs = last_state.state;
-                if (cs == COOKING_STATE_IDLE ||
-                    cs == COOKING_STATE_DONE  ||
-                    cs == COOKING_STATE_ERROR) {
+                if (cooking_logic_ota_should_dispatch(cs)) {
                     configASSERT(s_cfg.ota_url_q != NULL);
                     BaseType_t send_ok = xQueueSend(s_cfg.ota_url_q, url_copy, 0);
                     if (send_ok == pdTRUE) {

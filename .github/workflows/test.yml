@@ -27,3 +27,22 @@ jobs:
           . /opt/esp/idf/export.sh
           cd test_apps/drivers
           idf.py build
+
+  unit-tests:
+    name: Run unit tests (Linux host)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and run unit tests
+        run: |
+          . /opt/esp/idf/export.sh
+          cd test_apps/unity
+          idf.py --preview set-target linux
+          idf.py build
+          ./build/unity_tests.elf
