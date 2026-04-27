@@ -1,10 +1,13 @@
 #include "comms_task.h"
+#include "ota_task.h"
 #include "app_types.h"
 #include "provisioning.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+
+#include "esp_ota_ops.h"
 
 #include "mbedtls/platform_util.h"
 #include "esp_timer.h"
@@ -47,6 +50,11 @@ static const char *TAG = "comms";
 static comms_task_config_t s_cfg;
 static EventGroupHandle_t  s_wifi_eg;
 static uint8_t             s_retry_count = 0u;
+
+/* Pending OTA URL — set when URL arrives during an active cooking cycle.
+ * Dispatched to ota_url_q once state reaches IDLE / DONE / ERROR. */
+static char  s_pending_ota_url[OTA_URL_MAX_LEN];
+static bool  s_ota_pending = false;
 
 /* ── Wi-Fi event handler ────────────────────────────────────────────────── */
 
@@ -214,6 +222,19 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
         esp_mqtt_client_subscribe(ev->client, TOPIC_CMD, 1);
         esp_mqtt_client_subscribe(ev->client, TOPIC_OTA, 1);
         ESP_LOGI(TAG, "MQTT subscribed: " TOPIC_CMD ", " TOPIC_OTA);
+
+        /* Boot self-check: Wi-Fi + MQTT connected → mark firmware valid (FR-10, NFR-05).
+         * Only acts when running from a freshly flashed OTA partition pending
+         * verification; no-op on normal boot or after already marked valid. */
+        {
+            const esp_partition_t *running = esp_ota_get_running_partition();
+            esp_ota_img_states_t   ota_state;
+            if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+                ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+                esp_ota_mark_app_valid_cancel_rollback();
+                ESP_LOGI(TAG, "OTA: new firmware validated — rollback cancelled");
+            }
+        }
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -227,9 +248,14 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 handle_cmd_payload(ev->data, ev->data_len);
             } else if (strncmp(ev->topic, TOPIC_OTA,
                                (size_t)ev->topic_len) == 0) {
-                /* M4-T3: OTA handler placeholder — log firmware URL */
-                ESP_LOGI(TAG, "OTA: firmware URL received (%.*s)",
-                         ev->data_len, ev->data);
+                /* Store URL; dispatch to ota_task when state allows (FR-10) */
+                int copy_len = ev->data_len < (int)(OTA_URL_MAX_LEN - 1u)
+                               ? ev->data_len
+                               : (int)(OTA_URL_MAX_LEN - 1u);
+                memcpy(s_pending_ota_url, ev->data, (size_t)copy_len);
+                s_pending_ota_url[copy_len] = '\0';
+                s_ota_pending = true;
+                ESP_LOGI(TAG, "OTA: URL queued — %s", s_pending_ota_url);
             }
         }
         break;
@@ -329,6 +355,22 @@ static void comms_task(void *arg) {
 
         if (!have_state || mqtt_client == NULL) {
             continue;
+        }
+
+        /* ── OTA deferral: dispatch pending URL when cycle is not active ── */
+        if (s_ota_pending) {
+            cooking_state_t cs = last_state.state;
+            if (cs == COOKING_STATE_IDLE ||
+                cs == COOKING_STATE_DONE  ||
+                cs == COOKING_STATE_ERROR) {
+                if (xQueueSend(s_cfg.ota_url_q, s_pending_ota_url, 0) == pdTRUE) {
+                    s_ota_pending = false;
+                    ESP_LOGI(TAG, "OTA: URL dispatched to ota_task");
+                }
+            } else {
+                ESP_LOGD(TAG, "OTA: deferred — cycle active (%s)",
+                         state_name(last_state.state));
+            }
         }
 
         uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000LL);
