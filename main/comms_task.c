@@ -67,6 +67,9 @@ static bool wifi_init(void) {
     if (!provisioning_load_credentials(ssid, sizeof(ssid),
                                        pass, sizeof(pass))) {
         ESP_LOGE(TAG, "Failed to load Wi-Fi credentials from NVS");
+        /* Missing/corrupt credentials — erase/reset and restart into Blufi (FR-07) */
+        provisioning_on_wifi_failure();
+        /* not reached — provisioning_on_wifi_failure() calls esp_restart() */
         return false;
     }
 
