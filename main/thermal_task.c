@@ -184,6 +184,7 @@ static void thermal_task(void *arg) {
             bool       early    = false;
 
             for (;;) {
+                ESP_ERROR_CHECK(esp_task_wdt_reset());
                 TickType_t now       = xTaskGetTickCount();
                 TickType_t remaining = (TickType_t)(deadline - now);
 
