@@ -28,6 +28,20 @@ static ota_task_config_t s_cfg;
 static void ota_task(void *arg) {
     (void)arg;
 
+    /* NOTE: ota_task is intentionally NOT registered with the task watchdog.
+     *
+     * NFR-01 requires WDT on all tasks, but ota_task is a deliberate exception:
+     *   - It only runs when the cooking cycle is inactive (IDLE/DONE/ERROR);
+     *     a hang here cannot affect actuator safety or Core 1 real-time control.
+     *   - esp_https_ota() can legitimately take 30-120 s on slow links, well
+     *     beyond the 5 s TWDT timeout. A mid-download WDT reset is
+     *     indistinguishable from a real hang and forces an unnecessary restart.
+     *   - The HTTP socket timeout (timeout_ms=30000) is the actual hang guard:
+     *     if the server stops sending, the socket errors out cleanly within
+     *     30 s and the task loops back to wait for a corrected URL.
+     *   - Matches Espressif's own OTA examples, which also omit TWDT.
+     * See SDD §4 — NFR-01 exception note. */
+
     for (;;) {
         /* Block indefinitely until comms_task dispatches a URL.
          * comms_task guarantees it only sends when state is IDLE/DONE/ERROR
@@ -42,6 +56,9 @@ static void ota_task(void *arg) {
             .url               = url,
             .keep_alive_enable = true,
             .buffer_size_tx    = 4096,   /* GitHub response headers are large */
+            .timeout_ms        = 30000,  /* socket recv timeout — guards against server hang.
+                                          * 30 s allows for TCP retransmissions on poor Wi-Fi.
+                                          * Not WDT-constrained: ota_task excluded from TWDT. */
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
         esp_https_ota_config_t ota_cfg = {
