@@ -40,9 +40,152 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build and run unit tests
+        shell: bash
         run: |
           . /opt/esp/idf/export.sh
           cd test_apps/unity
+
           idf.py --preview set-target linux
           idf.py build
-          ./build/unity_tests.elf
+
+          set +e
+          ./build/unity_tests.elf 2>&1 | tee test_results.raw
+          test_exit=${PIPESTATUS[0]}
+          set -e
+
+          python3 - <<PY
+          from pathlib import Path
+          import html
+
+          raw = Path("test_results.raw").read_text(errors="replace")
+          test_exit = int("${test_exit}")
+
+          failures = 1 if test_exit != 0 else 0
+
+          failure_block = ""
+          if failures:
+              failure_block = f"""
+              <failure message="Unity tests failed">
+          {html.escape(raw)}
+              </failure>
+          """
+
+          xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+          <testsuite name="unity-host-tests" tests="1" failures="{failures}" errors="0" skipped="0" time="0">
+            <testcase classname="unity" name="unity_tests" time="0">
+          {failure_block}
+              <system-out>{html.escape(raw)}</system-out>
+            </testcase>
+          </testsuite>
+          """
+
+          Path("test_results.xml").write_text(xml)
+          print("JUnit XML written to test_results.xml")
+          PY
+
+          exit "${test_exit}"
+
+      - name: Generate HTML test report
+        if: always()
+        run: |
+          cd test_apps/unity
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import html
+
+          raw = Path("test_results.raw").read_text(errors="replace") if Path("test_results.raw").exists() else "No test output found."
+
+          status = "PASSED" if "FAIL" not in raw else "FAILED"
+
+          report = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>ESP32 Firmware Test Report</title>
+            <style>
+              body {{
+                font-family: Arial, sans-serif;
+                margin: 40px;
+                background: #f7f7f7;
+                color: #222;
+              }}
+              .card {{
+                background: white;
+                border-radius: 12px;
+                padding: 24px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                max-width: 1000px;
+              }}
+              .passed {{
+                color: #0a7f28;
+                font-weight: bold;
+              }}
+              .failed {{
+                color: #b00020;
+                font-weight: bold;
+              }}
+              pre {{
+                background: #111;
+                color: #eee;
+                padding: 16px;
+                border-radius: 8px;
+                overflow-x: auto;
+              }}
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>ESP32 Firmware Test Report</h1>
+              <p><strong>Project:</strong> esp32-smart-cooking-firmware</p>
+              <p><strong>Test target:</strong> Linux host unit tests</p>
+              <p><strong>Status:</strong> <span class="{status.lower()}">{status}</span></p>
+
+              <h2>Raw Unity Output</h2>
+              <pre>{html.escape(raw)}</pre>
+            </div>
+          </body>
+          </html>
+          """
+
+          Path("test-report.html").write_text(report)
+          print("HTML report generated")
+          PY
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unity-test-report
+          path: |
+            test_apps/unity/test-report.html
+            test_apps/unity/test_results.xml
+            test_apps/unity/test_results.raw
+          if-no-files-found: error
+
+  publish-test-results:
+    name: Publish unit test results
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download unit test report artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: unity-test-report
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        with:
+          name: Unit Tests
+          path: test_results.xml
+          reporter: java-junit
+          fail-on-error: true
