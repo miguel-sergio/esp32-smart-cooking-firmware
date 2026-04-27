@@ -2,9 +2,13 @@
 #include "app_types.h"
 #include "provisioning.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "mbedtls/platform_util.h"
+#include "esp_timer.h"
+#include "cJSON.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -20,13 +24,23 @@ static const char *TAG = "comms";
 
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
-#define COMMS_STACK_WORDS   (4096u / sizeof(StackType_t))
+#define COMMS_STACK_WORDS   (6144u / sizeof(StackType_t))
 #define COMMS_PRIORITY      3
 #define COMMS_CORE          0
 
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
 #define WIFI_MAX_RETRIES    PROV_WIFI_MAX_RETRIES   /* 3 retries — FR-07 */
+
+/* MQTT topics (FR-08, FR-09, FR-10) */
+#define TOPIC_TELEMETRY     "cooking/telemetry"
+#define TOPIC_FAULT         "cooking/fault"
+#define TOPIC_CMD           "cooking/cmd"
+#define TOPIC_OTA           "cooking/ota"
+
+/* Telemetry publish intervals — FR-08 */
+#define TELEM_INTERVAL_ACTIVE_MS   1000u   /*  1 Hz — PREHEAT / COOKING / DONE / ERROR */
+#define TELEM_INTERVAL_IDLE_MS    10000u   /* 0.1 Hz — IDLE */
 
 /* ── Module state ───────────────────────────────────────────────────────── */
 
@@ -126,6 +140,67 @@ static bool wifi_init(void) {
     return false;
 }
 
+/* ── CMD payload parser (FR-09) ─────────────────────────────────────────── */
+
+static void handle_cmd_payload(const char *data, int data_len) {
+    /* cJSON_ParseWithLength requires a null-terminated string or at least a
+     * buffer large enough — MQTT event data is NOT null-terminated, so copy
+     * into a stack buffer first. */
+    char buf[256];
+    if (data_len <= 0 || data_len >= (int)sizeof(buf)) {
+        ESP_LOGW(TAG, "CMD: payload length %d out of range — discarded", data_len);
+        return;
+    }
+    memcpy(buf, data, (size_t)data_len);
+    buf[data_len] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "CMD: JSON parse failed — payload discarded");
+        return;
+    }
+
+    cJSON *cmd_item = cJSON_GetObjectItemCaseSensitive(root, "cmd");
+    if (!cJSON_IsString(cmd_item) || cmd_item->valuestring == NULL) {
+        ESP_LOGW(TAG, "CMD: missing or invalid \"cmd\" field — discarded");
+        cJSON_Delete(root);
+        return;
+    }
+
+    const char *cmd_str = cmd_item->valuestring;
+    mqtt_cmd_t  cmd     = { .type = CMD_STOP, .profile_id = 0u };
+    bool        valid   = true;
+
+    if (strcmp(cmd_str, "START") == 0) {
+        cmd.type = CMD_START;
+        cJSON *pid = cJSON_GetObjectItemCaseSensitive(root, "profile_id");
+        if (cJSON_IsNumber(pid)) {
+            int v = (int)pid->valuedouble;
+            cmd.profile_id = (v >= 0 && v <= 255) ? (uint8_t)v : 0u;
+        }
+    } else if (strcmp(cmd_str, "STOP") == 0) {
+        cmd.type = CMD_STOP;
+    } else if (strcmp(cmd_str, "ESTOP") == 0) {
+        cmd.type = CMD_ESTOP;
+    } else if (strcmp(cmd_str, "RESET") == 0) {
+        cmd.type = CMD_RESET;
+    } else {
+        ESP_LOGW(TAG, "CMD: unknown command \"%s\" — discarded", cmd_str);
+        valid = false;
+    }
+
+    if (valid) {
+        if (xQueueSend(s_cfg.cmd_q, &cmd, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "CMD: cmd_q full — command dropped");
+        } else {
+            ESP_LOGI(TAG, "CMD: dispatched %s (profile=%u)",
+                     cmd_str, (unsigned)cmd.profile_id);
+        }
+    }
+
+    cJSON_Delete(root);
+}
+
 /* ── MQTT event handler ─────────────────────────────────────────────────── */
 
 static void mqtt_event_handler(void *arg, esp_event_base_t base,
@@ -135,13 +210,34 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT connected");
+        /* Subscribe to command and OTA topics on every (re)connect — FR-09, FR-10 */
+        esp_mqtt_client_subscribe(ev->client, TOPIC_CMD, 1);
+        esp_mqtt_client_subscribe(ev->client, TOPIC_OTA, 1);
+        ESP_LOGI(TAG, "MQTT subscribed: " TOPIC_CMD ", " TOPIC_OTA);
         break;
+
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected");
         break;
+
+    case MQTT_EVENT_DATA:
+        if (ev->topic_len > 0 && ev->data_len > 0) {
+            if (strncmp(ev->topic, TOPIC_CMD,
+                        (size_t)ev->topic_len) == 0) {
+                handle_cmd_payload(ev->data, ev->data_len);
+            } else if (strncmp(ev->topic, TOPIC_OTA,
+                               (size_t)ev->topic_len) == 0) {
+                /* M4-T3: OTA handler placeholder — log firmware URL */
+                ESP_LOGI(TAG, "OTA: firmware URL received (%.*s)",
+                         ev->data_len, ev->data);
+            }
+        }
+        break;
+
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "MQTT error type: %d", ev->error_handle->error_type);
         break;
+
     default:
         break;
     }
@@ -201,8 +297,14 @@ static void comms_task(void *arg) {
         mqtt_client = mqtt_init();
     }
 
-    /* ── Loop — drain state_q and log ──────────────────────────────────── */
+    /* ── Loop — telemetry, fault alerts, command dispatch ──────────────── */
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
+    system_state_t   last_state    = { .state = COOKING_STATE_IDLE,
+                                       .fault = FAULT_NONE };
+    bool             have_state    = false;
+    bool             fault_alerted = false; /* true after fault published; reset on exit */
+    uint32_t         last_telem_ms = 0u;
 
 #if CONFIG_SMART_COOKING_STABILITY_TEST
     TickType_t last_diag = 0u; /* 30 s diagnostic anchor */
@@ -211,16 +313,62 @@ static void comms_task(void *arg) {
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
 
-        system_state_t state;
-        if (xQueueReceive(s_cfg.state_q, &state, pdMS_TO_TICKS(1000u)) == pdTRUE) {
-            ESP_LOGI(TAG, "state=%s  T=%.1f°C  fault=%s",
-                     state_name(state.state),
-                     state.temperature,
-                     fault_name(state.fault));
+        /* Block for up to 100 ms waiting for the first item, then drain the
+         * rest of the queue non-blocking.  This guarantees the loop runs at
+         * most 10 times/s, keeping CPU 0 free for IDLE and other tasks. */
+        system_state_t incoming;
+        if (xQueueReceive(s_cfg.state_q, &incoming,
+                          pdMS_TO_TICKS(100u)) == pdTRUE) {
+            last_state = incoming;
+            have_state = true;
+            /* Drain any additional items queued since we started blocking */
+            while (xQueueReceive(s_cfg.state_q, &incoming, 0) == pdTRUE) {
+                last_state = incoming;
+            }
         }
 
-        /* TODO M4: publish state to MQTT */
-        (void)mqtt_client;
+        if (!have_state || mqtt_client == NULL) {
+            continue;
+        }
+
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000LL);
+
+        /* ── Fault alert: publish once on transition into ERROR (FR-08) ─── */
+        if (last_state.state == COOKING_STATE_ERROR && !fault_alerted) {
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "{\"fault\":\"%s\",\"last_temp\":%.1f,"
+                     "\"timestamp_ms\":%" PRIu32 "}",
+                     fault_name(last_state.fault),
+                     last_state.temperature,
+                     now_ms);
+            esp_mqtt_client_publish(mqtt_client, TOPIC_FAULT, buf, 0, 1, 0);
+            ESP_LOGW(TAG, "Fault alert published: %s", buf);
+            fault_alerted = true;
+        } else if (last_state.state != COOKING_STATE_ERROR) {
+            fault_alerted = false;  /* reset so next ERROR triggers a new alert */
+        }
+
+        /* ── Telemetry: rate-limited JSON publish (FR-08) ───────────────── */
+        uint32_t interval = (last_state.state == COOKING_STATE_IDLE)
+                            ? TELEM_INTERVAL_IDLE_MS
+                            : TELEM_INTERVAL_ACTIVE_MS;
+
+        if ((now_ms - last_telem_ms) >= interval) {
+            last_telem_ms = now_ms;
+            char buf[192];
+            snprintf(buf, sizeof(buf),
+                     "{\"temp\":%.1f,\"humidity\":%.1f,\"phase\":\"%s\","
+                     "\"motor_duty\":%d,\"profile\":%u,\"fault\":\"%s\"}",
+                     last_state.temperature,
+                     last_state.humidity,
+                     state_name(last_state.state),
+                     (int)last_state.motor_duty_pct,
+                     (unsigned)last_state.active_profile,
+                     fault_name(last_state.fault));
+            esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY, buf, 0, 1, 0);
+            ESP_LOGD(TAG, "Telemetry: %s", buf);
+        }
 
 #if CONFIG_SMART_COOKING_STABILITY_TEST
         /* ── Periodic diagnostics (every 30 s) ──────────────────────────── */

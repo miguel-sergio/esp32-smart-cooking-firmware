@@ -61,6 +61,9 @@ typedef struct {
 /* control_task → comms_task (state_q) */
 typedef struct {
     cooking_state_t state;
-    float           temperature;
+    float           temperature;    /* °C                                    */
+    float           humidity;       /* % RH — from thermal_task              */
     fault_type_t    fault;
+    uint8_t         active_profile; /* 0 = Standard, 1 = Delicate            */
+    int8_t          motor_duty_pct; /* 0 = stopped, >0 = running             */
 } system_state_t;

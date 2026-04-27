@@ -165,11 +165,20 @@ static bool check_heater_fail(float last_temp, float target, uint32_t tick,
     return false;
 }
 
-static void publish_state(cooking_state_t state, float temp, fault_type_t fault) {
+static void publish_state(cooking_state_t state, float temp, float humidity,
+                          fault_type_t fault, uint8_t active_profile,
+                          int8_t motor_duty_pct) {
     if (s_cfg.state_q == NULL) {
         return;
     }
-    system_state_t s = { .state = state, .temperature = temp, .fault = fault };
+    system_state_t s = {
+        .state          = state,
+        .temperature    = temp,
+        .humidity       = humidity,
+        .fault          = fault,
+        .active_profile = active_profile,
+        .motor_duty_pct = motor_duty_pct,
+    };
     if (xQueueSend(s_cfg.state_q, &s, 0) != pdTRUE) {
         /* comms_task drains this queue; a full queue means it is behind — acceptable */
     }
@@ -190,6 +199,8 @@ static void control_task(void *arg) {
     uint32_t last_temp_ms         = 0;
     uint32_t below_target_since_ms = 0;   /* start of current below-target window, 0 = at target */
     float    last_temp            = 0.0f;
+    float    last_humidity        = 0.0f;
+    int8_t   last_motor_duty      = 0;
 
     TickType_t last_wake  = xTaskGetTickCount();
 #if CONFIG_SMART_COOKING_STABILITY_TEST
@@ -300,8 +311,9 @@ static void control_task(void *arg) {
         temp_reading_t reading;
         while (xQueueReceive(s_cfg.temp_q, &reading, 0) == pdTRUE) {
             if (reading.valid) {
-                last_temp    = reading.temperature;
-                last_temp_ms = tick;
+                last_temp     = reading.temperature;
+                last_humidity = reading.humidity;
+                last_temp_ms  = tick;
             }
         }
 
@@ -466,7 +478,10 @@ static void control_task(void *arg) {
         }
 
         /* ── 5. Publish current state to comms_task ─────────────────────── */
-        publish_state(state, last_temp, active_fault);
+        /* Derive current motor duty from profile when in COOKING, else 0. */
+        last_motor_duty = (state == COOKING_STATE_COOKING) ? profile->motor_duty_pct : 0;
+        publish_state(state, last_temp, last_humidity, active_fault,
+                      (uint8_t)(profile - s_profiles), last_motor_duty);
 
 #if CONFIG_SMART_COOKING_STABILITY_TEST
         /* ── 6. Periodic diagnostics (every 30 s) ──────────────────────── */
