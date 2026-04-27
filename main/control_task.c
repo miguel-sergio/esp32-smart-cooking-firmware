@@ -246,7 +246,7 @@ static void control_task(void *arg) {
             if (last_temp < (profile->preheat_target - 1.0f)) {
                 if (below_target_since_ms == 0u) {
                     below_target_since_ms = tick;   /* start consolidation window */
-                } else if ((tick - below_target_since_ms) > HEAT_RISE_MS) {
+                } else if ((tick - below_target_since_ms) >= HEAT_RISE_MS) {
                     active_fault = FAULT_HEATER_FAIL;
                     state        = COOKING_STATE_ERROR;
                     break;
@@ -284,7 +284,7 @@ static void control_task(void *arg) {
             if (last_temp < (profile->cook_target - 1.0f)) {
                 if (below_target_since_ms == 0u) {
                     below_target_since_ms = tick;   /* start consolidation window */
-                } else if ((tick - below_target_since_ms) > HEAT_RISE_MS) {
+                } else if ((tick - below_target_since_ms) >= HEAT_RISE_MS) {
                     active_fault = FAULT_HEATER_FAIL;
                     state        = COOKING_STATE_ERROR;
                     break;
