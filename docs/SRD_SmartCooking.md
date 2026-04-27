@@ -75,7 +75,7 @@ ERROR state.
 | ESTOP | Emergency stop command received remotely |
 | Heater failure *(CR-001)* | Temperature remains more than 1 °C below the active phase target for 2 consecutive minutes during PREHEAT or COOKING; the window resets if temperature recovers |
 
-> **CR-001** — *Change request raised 2026-04-26.* Added a heater-failure fault to detect a non-functioning or degraded heating element at any point during the COOKING phase. The system monitors temperature continuously; if it remains more than 1 °C below the cooking target for 2 consecutive minutes, the system transitions to ERROR. A temporary dip followed by recovery resets the consolidation window and does not trigger the fault.
+> **CR-001** — *Change request raised 2026-04-26.* Added a heater-failure fault to detect a non-functioning or degraded heating element during PREHEAT or COOKING. The system monitors temperature continuously; if it remains more than 1 °C below the active phase target for 2 consecutive minutes, the system transitions to ERROR. A temporary dip followed by recovery resets the consolidation window and does not trigger the fault.
 
 In ERROR state: motor stops immediately, heating element PWM set to 0%,
 fault type and timestamp logged via UART, fault published remotely.
