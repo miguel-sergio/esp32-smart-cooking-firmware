@@ -6,8 +6,12 @@
 #include "esp_log.h"
 #include "esp_task_wdt.h"
 #include "esp_system.h"
+#include "nvs.h"
 
 static const char *TAG = "ctrl";
+
+/* ── Generic helpers ───────────────────────────────────────────────────── */
+#define ARRAY_SIZE(a)  (sizeof(a) / sizeof((a)[0]))
 
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
@@ -18,10 +22,24 @@ static const char *TAG = "ctrl";
 
 #define SENSOR_TIMEOUT_MS   3000u       /* fault if no reading for 3 s     */
 #define DONE_AUTORETURN_MS  60000u      /* SRD: auto-return IDLE 60 s after DONE */
-#define HEAT_RISE_MS        120000u     /* fault if temp below cook_target for >2 min in COOKING */
+
+/* HEAT_RISE_MS: fault if temp stays below target for this long.
+ * In fault-inject builds reduce to 15 s so the test completes quickly. */
+#if CONFIG_SMART_COOKING_FAULT_INJECT
+#define HEAT_RISE_MS        15000u
+#else
+#define HEAT_RISE_MS        120000u
+#endif
+
+/* ── NVS namespace and keys ────────────────────────────────────────────── */
+#define NVS_NAMESPACE       "cooking"
+#define NVS_KEY_ACTIVE_PROF "active_profile"
+#define NVS_KEY_PROFILE_FMT "profile_%u"
 
 /* ── Cooking profiles ───────────────────────────────────────────────────── */
-/* Stored in NVS in a future milestone; compile-time constants for v1.0.    */
+/* Compile-time defaults.  On first boot these are written as blobs to NVS  *
+ * (namespace "cooking", keys "profile_0" / "profile_1") so a future        *
+ * milestone can update them over MQTT without a firmware rebuild.           */
 
 typedef struct {
     float    preheat_target;    /* °C — transition PREHEAT → COOKING   */
@@ -31,11 +49,19 @@ typedef struct {
     int8_t   motor_duty_pct;    /* %   — motor duty during cook cycle  */
 } cooking_profile_t;
 
-static const cooking_profile_t s_profiles[2] = {
+static const cooking_profile_t s_profiles[] = {
     [0] = {                         /* Profile 0 — Standard              */
+#if CONFIG_SMART_COOKING_FAULT_INJECT
+        .preheat_target   = 26.0f,
+        .cook_target      = 28.0f,
+        /* In fault-inject builds lower safety_cutoff to 24 °C so OVERTEMP
+         * triggers at ambient without real heating hardware. */
+        .safety_cutoff    = 30.0f,
+#else
         .preheat_target   = 60.0f,
         .cook_target      = 80.0f,
         .safety_cutoff    = 95.0f,
+#endif
         .cook_duration_ms = 30u * 60u * 1000u,
         .motor_duty_pct   = 60,
     },
@@ -168,6 +194,56 @@ static void control_task(void *arg) {
     TickType_t last_diag  = 0u; /* anchor for 30 s diagnostic log */
 #endif
 
+    /* ── NVS: open namespace, seed profile blobs, load active profile ───── */
+    nvs_handle_t nvs    = 0;
+    bool         nvs_ok = false;
+    {
+        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "NVS open failed (%s) — profile persistence disabled",
+                     esp_err_to_name(err));
+        } else {
+            nvs_ok     = true;
+            bool dirty = false;
+
+            /* Seed compile-time profile blobs on first boot only. */
+            for (uint8_t i = 0u; i < (uint8_t)ARRAY_SIZE(s_profiles); i++) {
+                char              key[12];
+                snprintf(key, sizeof(key), NVS_KEY_PROFILE_FMT, (unsigned)i);
+                size_t            len = sizeof(cooking_profile_t);
+                cooking_profile_t tmp;
+                if (nvs_get_blob(nvs, key, &tmp, &len) == ESP_ERR_NVS_NOT_FOUND) {
+                    ESP_ERROR_CHECK(nvs_set_blob(nvs, key, &s_profiles[i],
+                                                sizeof(cooking_profile_t)));
+                    ESP_LOGI(TAG, "NVS: seeded %s", key);
+                    dirty = true;
+                }
+            }
+
+            /* Read active_profile; write default 0 if key is absent. */
+            uint8_t pid = 0u;
+            err = nvs_get_u8(nvs, NVS_KEY_ACTIVE_PROF, &pid);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                ESP_ERROR_CHECK(nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, 0u));
+                dirty = true;
+                ESP_LOGI(TAG, "NVS: active_profile not found — default 0 written");
+            } else if (err == ESP_OK) {
+                if (pid >= (uint8_t)ARRAY_SIZE(s_profiles)) { pid = 0u; }
+                ESP_LOGI(TAG, "NVS: active_profile = %u", (unsigned)pid);
+            } else {
+                ESP_LOGW(TAG, "NVS: active_profile read error (%s) — using 0",
+                         esp_err_to_name(err));
+                pid = 0u;
+            }
+
+            if (dirty) {
+                ESP_ERROR_CHECK(nvs_commit(nvs));
+            }
+
+            profile = &s_profiles[pid];
+        }
+    }
+
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
     for (;;) {
@@ -239,7 +315,17 @@ static void control_task(void *arg) {
         switch (state) {
         case COOKING_STATE_IDLE:
             if (got_cmd && cmd.type == CMD_START) {
-                uint8_t pid = (cmd.profile_id < 2u) ? cmd.profile_id : 0u;
+                uint8_t pid = (cmd.profile_id < (uint8_t)ARRAY_SIZE(s_profiles))
+                              ? cmd.profile_id : 0u;
+                /* Persist selected profile so it survives reboots. */
+                if (nvs_ok) {
+                    esp_err_t err = nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, pid);
+                    if (err == ESP_OK) { err = nvs_commit(nvs); }
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "NVS: failed to persist active_profile (%s)",
+                                 esp_err_to_name(err));
+                    }
+                }
                 profile      = &s_profiles[pid];
                 active_fault = FAULT_NONE;
                 state        = COOKING_STATE_PREHEAT;

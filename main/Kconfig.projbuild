@@ -35,4 +35,13 @@ menu "Smart Cooking App"
             into the control command queue. Intended for M3 hardware testing
             before MQTT commands are available. Do not enable in production.
 
+    config SMART_COOKING_FAULT_INJECT
+        bool "Enable fault injection overrides for testing"
+        default n
+        help
+            Lowers Profile 0 safety_cutoff to 24 °C (triggerable at ambient)
+            and reduces HEAT_RISE_MS to 15 s so FAULT_OVERTEMP and
+            FAULT_HEATER_FAIL can be tested without real heating hardware.
+            Must never be enabled in production builds.
+
 endmenu
