@@ -1,5 +1,6 @@
 #include "comms_task.h"
 #include "app_types.h"
+#include "provisioning.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,7 +22,7 @@ static const char *TAG = "comms";
 
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
-#define WIFI_MAX_RETRIES    5u
+#define WIFI_MAX_RETRIES    PROV_WIFI_MAX_RETRIES   /* 3 retries — FR-07 */
 
 /* ── Module state ───────────────────────────────────────────────────────── */
 
@@ -50,6 +51,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Wi-Fi connected — IP: " IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry_count = 0u;
+        provisioning_on_wifi_success();
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
     }
 }
@@ -57,6 +59,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
 /* ── Wi-Fi init ─────────────────────────────────────────────────────────── */
 
 static bool wifi_init(void) {
+    /* Ensure credentials are in NVS — enters Blufi mode if first boot */
+    provisioning_ensure();
+
+    char ssid[PROV_SSID_MAX_LEN];
+    char pass[PROV_PASS_MAX_LEN];
+    if (!provisioning_load_credentials(ssid, sizeof(ssid),
+                                       pass, sizeof(pass))) {
+        ESP_LOGE(TAG, "Failed to load Wi-Fi credentials from NVS");
+        return false;
+    }
+
     s_wifi_eg = xEventGroupCreate();
     configASSERT(s_wifi_eg != NULL);
 
@@ -72,18 +85,15 @@ static bool wifi_init(void) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL));
 
-    wifi_config_t wifi_cfg = {
-        .sta = {
-            .ssid     = CONFIG_SMART_COOKING_WIFI_SSID,
-            .password = CONFIG_SMART_COOKING_WIFI_PASSWORD,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
+    wifi_config_t wifi_cfg = { 0 };
+    strlcpy((char *)wifi_cfg.sta.ssid,     ssid, sizeof(wifi_cfg.sta.ssid));
+    strlcpy((char *)wifi_cfg.sta.password, pass, sizeof(wifi_cfg.sta.password));
+    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Wi-Fi connecting to SSID: \"%s\"", CONFIG_SMART_COOKING_WIFI_SSID);
+    ESP_LOGI(TAG, "Wi-Fi connecting to SSID: \"%s\"", ssid);
     ESP_LOGI(TAG, "MQTT broker URI configured");
 
     /* Wait until either connected or all retries exhausted.
@@ -98,7 +108,9 @@ static bool wifi_init(void) {
         return true;
     }
 
-    ESP_LOGE(TAG, "Wi-Fi connection failed — comms running offline");
+    /* All retries exhausted — erase credentials and restart for Blufi (FR-07) */
+    provisioning_on_wifi_failure();
+    /* not reached — provisioning_on_wifi_failure() calls esp_restart() */
     return false;
 }
 
