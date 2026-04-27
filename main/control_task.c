@@ -197,8 +197,9 @@ static void control_task(void *arg) {
 #endif
 
     /* ── NVS: open namespace, seed profile blobs, load active profile ───── */
-    nvs_handle_t nvs    = 0;
-    bool         nvs_ok = false;
+    nvs_handle_t nvs          = 0;
+    bool         nvs_ok       = false;
+    uint8_t      persisted_pid = 0u;   /* last value committed to NVS */
     {
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
         if (err != ESP_OK) {
@@ -208,22 +209,45 @@ static void control_task(void *arg) {
             nvs_ok     = true;
             bool dirty = false;
 
-            /* Seed compile-time profile blobs on first boot only. */
+            /* Seed compile-time profile blobs on first boot.
+             * Also overwrite if the stored blob length differs from the
+             * current struct size — this handles schema changes across
+             * firmware updates (fields added, removed, or reordered). */
             for (uint8_t i = 0u; i < (uint8_t)ARRAY_SIZE(s_profiles); i++) {
                 char              key[12];
                 snprintf(key, sizeof(key), NVS_KEY_PROFILE_FMT, (unsigned)i);
-                size_t            len = sizeof(cooking_profile_t);
+                size_t            len      = sizeof(cooking_profile_t);
                 cooking_profile_t tmp;
-                if (nvs_get_blob(nvs, key, &tmp, &len) == ESP_ERR_NVS_NOT_FOUND) {
+                esp_err_t         blob_err = nvs_get_blob(nvs, key, &tmp, &len);
+
+                bool needs_write = false;
+                if (blob_err == ESP_ERR_NVS_NOT_FOUND) {
+                    ESP_LOGI(TAG, "NVS: %s not found — seeding default", key);
+                    needs_write = true;
+                } else if (blob_err == ESP_ERR_NVS_INVALID_LENGTH ||
+                           (blob_err == ESP_OK && len != sizeof(cooking_profile_t))) {
+                    /* Stored blob is a different size: schema changed across
+                     * firmware update.  Reset to compile-time default so NVS
+                     * stays consistent with the current struct layout. */
+                    ESP_LOGW(TAG,
+                             "NVS: %s size mismatch (stored=%zu expected=%zu)"
+                             " — resetting to default",
+                             key, len, sizeof(cooking_profile_t));
+                    needs_write = true;
+                } else if (blob_err != ESP_OK) {
+                    ESP_LOGW(TAG, "NVS: %s read error (%s) — skipping",
+                             key, esp_err_to_name(blob_err));
+                }
+
+                if (needs_write) {
                     esp_err_t set_err = nvs_set_blob(nvs, key, &s_profiles[i],
                                                      sizeof(cooking_profile_t));
                     if (set_err != ESP_OK) {
-                        ESP_LOGW(TAG, "NVS: failed to seed %s (%s) — persistence disabled",
+                        ESP_LOGW(TAG, "NVS: failed to write %s (%s) — persistence disabled",
                                  key, esp_err_to_name(set_err));
                         nvs_ok = false;
                         break;
                     }
-                    ESP_LOGI(TAG, "NVS: seeded %s", key);
                     dirty = true;
                 }
             }
@@ -245,6 +269,7 @@ static void control_task(void *arg) {
                 }
             } else if (err == ESP_OK) {
                 if (pid >= (uint8_t)ARRAY_SIZE(s_profiles)) { pid = 0u; }
+                persisted_pid = pid;
                 ESP_LOGI(TAG, "NVS: active_profile = %u", (unsigned)pid);
             } else {
                 ESP_LOGW(TAG, "NVS: active_profile read error (%s) — using 0",
@@ -338,11 +363,14 @@ static void control_task(void *arg) {
             if (got_cmd && cmd.type == CMD_START) {
                 uint8_t pid = (cmd.profile_id < (uint8_t)ARRAY_SIZE(s_profiles))
                               ? cmd.profile_id : 0u;
-                /* Persist selected profile so it survives reboots. */
-                if (nvs_ok) {
+                /* Persist selected profile only when it actually changes to
+                 * avoid unnecessary NVS writes and flash wear. */
+                if (nvs_ok && pid != persisted_pid) {
                     esp_err_t err = nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, pid);
                     if (err == ESP_OK) { err = nvs_commit(nvs); }
-                    if (err != ESP_OK) {
+                    if (err == ESP_OK) {
+                        persisted_pid = pid;
+                    } else {
                         ESP_LOGW(TAG, "NVS: failed to persist active_profile (%s)",
                                  esp_err_to_name(err));
                     }
