@@ -57,7 +57,7 @@ static void nvs_save_credentials(const char *ssid, const char *pass) {
     nvs_set_str(nvs, PROV_NVS_KEY_PASS, pass);
     nvs_commit(nvs);
     nvs_close(nvs);
-    ESP_LOGI(TAG, "Credentials saved to NVS — SSID: %s", ssid);
+    ESP_LOGI(TAG, "Credentials saved to NVS (SSID length: %u)", (unsigned)strlen(ssid));
 }
 
 static void nvs_erase_credentials(void) {
