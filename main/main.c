@@ -11,6 +11,7 @@
 #include "thermal_task.h"
 #include "motor_task.h"
 #include "comms_task.h"
+#include "ota_task.h"
 #if CONFIG_SMART_COOKING_CLI
 #include "cli_task.h"
 #endif
@@ -45,6 +46,7 @@ static QueueHandle_t s_cmd_q;     /* comms_task   → control_task            */
 static QueueHandle_t s_motor_q;   /* control_task → motor_task              */
 static QueueHandle_t s_state_q;   /* control_task → comms_task              */
 static QueueHandle_t s_thermal_q; /* control_task → thermal_task            */
+static QueueHandle_t s_ota_url_q; /* comms_task   → ota_task                */
 
 /* ── app_main ─────────────────────────────────────────────────────────── */
 void app_main(void) {
@@ -75,7 +77,8 @@ void app_main(void) {
     s_motor_q   = xQueueCreate(4, sizeof(motor_cmd_t));
     s_state_q   = xQueueCreate(4, sizeof(system_state_t));
     s_thermal_q = xQueueCreate(4, sizeof(thermal_cmd_t));
-    configASSERT(s_temp_q && s_cmd_q && s_motor_q && s_state_q && s_thermal_q);
+    s_ota_url_q = xQueueCreate(1, OTA_URL_MAX_LEN);
+    configASSERT(s_temp_q && s_cmd_q && s_motor_q && s_state_q && s_thermal_q && s_ota_url_q);
 
     ESP_LOGI(TAG, "Queues created");
 
@@ -122,10 +125,17 @@ void app_main(void) {
 
     /* ── Start comms_task ────────────────────────────────────────── */
     comms_task_config_t comms_cfg = {
-        .state_q = s_state_q,
-        .cmd_q   = s_cmd_q,
+        .state_q   = s_state_q,
+        .cmd_q     = s_cmd_q,
+        .ota_url_q = s_ota_url_q,
     };
     comms_task_start(&comms_cfg);
+
+    /* ── Start ota_task ──────────────────────────────────────────── */
+    ota_task_config_t ota_cfg = {
+        .ota_url_q = s_ota_url_q,
+    };
+    ota_task_start(&ota_cfg);
 
 #if CONFIG_SMART_COOKING_CLI
     /* ── Start CLI task (M3 testing only) ──────────────────────────── */

@@ -6,8 +6,9 @@
 /* ── comms_task configuration ───────────────────────────────────────────── */
 
 typedef struct {
-    QueueHandle_t state_q;   /* IN:  system_state_t ← control_task          */
-    QueueHandle_t cmd_q;     /* OUT: mqtt_cmd_t     → control_task           */
+    QueueHandle_t state_q;     /* IN:  system_state_t ← control_task        */
+    QueueHandle_t cmd_q;       /* OUT: mqtt_cmd_t     → control_task         */
+    QueueHandle_t ota_url_q;   /* OUT: char[OTA_URL_MAX_LEN] → ota_task      */
 } comms_task_config_t;
 
 /* ── Public API ─────────────────────────────────────────────────────────── */

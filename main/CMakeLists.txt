@@ -7,5 +7,5 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES freertos log bme280 drv8833 nvs_flash esp_system
              esp_driver_i2c esp_driver_gpio esp_driver_ledc
-             app_types provisioning comms
+             app_types provisioning comms ota
 )
