@@ -168,33 +168,41 @@ static void thermal_task(void *arg) {
         }
 #endif
 
-        /* ── 5. Sleep for period_ms using vTaskDelayUntil in WDT-safe chunks
+        /* ── 5. Sleep for period_ms, waking immediately on incoming command.
          *
-         * Each chunk also peeks at thermal_q. If a new command is waiting,
-         * we break early so it is processed at the top of the next iteration
-         * without delay. The cadence anchor (last_wake) is reset to now on
-         * early wake so the next period starts from the wake-up point.     */
-        TickType_t sub_wake = last_wake;
-        TickType_t end_wake = last_wake + pdMS_TO_TICKS(period_ms);
-        bool       early    = false;
+         * xQueuePeek is used as the blocking primitive with a timeout of
+         * WDT_CHUNK_TICKS. This means the task unblocks as soon as a command
+         * is queued (not just at the next chunk boundary), eliminating the
+         * up-to-WDT_CHUNK_TICKS latency of the previous vTaskDelayUntil
+         * approach that caused SENSOR_TIMEOUT false-positives on PREHEAT entry.
+         *
+         * WDT is reset on every iteration (timed out or command received) so
+         * feeding is unconditional. The cadence anchor advances by exactly
+         * period_ms on the normal path to prevent drift accumulation.        */
+        {
+            TickType_t deadline = last_wake + pdMS_TO_TICKS(period_ms);
+            bool       early    = false;
 
-        while ((TickType_t)(end_wake - sub_wake) > WDT_CHUNK_TICKS) {
-            thermal_cmd_t peek;
-            if (xQueuePeek(s_cfg.thermal_q, &peek, 0) == pdTRUE) {
-                early = true;
-                break;
+            for (;;) {
+                TickType_t now       = xTaskGetTickCount();
+                TickType_t remaining = (TickType_t)(deadline - now);
+
+                /* Period elapsed or tick counter wrapped past deadline */
+                if (remaining == 0u || remaining > pdMS_TO_TICKS(period_ms)) {
+                    break;
+                }
+
+                TickType_t    wait = (remaining < WDT_CHUNK_TICKS) ? remaining : WDT_CHUNK_TICKS;
+                thermal_cmd_t peek;
+                if (xQueuePeek(s_cfg.thermal_q, &peek, wait) == pdTRUE) {
+                    early = true;
+                    break;
+                }
+                ESP_ERROR_CHECK(esp_task_wdt_reset());
             }
-            vTaskDelayUntil(&sub_wake, WDT_CHUNK_TICKS);
-            ESP_ERROR_CHECK(esp_task_wdt_reset());
-        }
-        if (!early) {
-            if (sub_wake != end_wake) {
-                vTaskDelayUntil(&sub_wake, (TickType_t)(end_wake - sub_wake));
-            }
-            ESP_ERROR_CHECK(esp_task_wdt_reset());
-            last_wake = sub_wake;           /* normal path: advance by period_ms */
-        } else {
-            last_wake = xTaskGetTickCount(); /* early wake: restart anchor from now */
+
+            last_wake = early ? xTaskGetTickCount()
+                              : (last_wake + pdMS_TO_TICKS(period_ms));
         }
     }
 }
