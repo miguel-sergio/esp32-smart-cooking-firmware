@@ -369,6 +369,8 @@ static void control_task(void *arg) {
                     esp_err_t err = nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, pid);
                     if (err == ESP_OK) { err = nvs_commit(nvs); }
                     if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "NVS: active_profile %u → %u persisted",
+                                 (unsigned)persisted_pid, (unsigned)pid);
                         persisted_pid = pid;
                     } else {
                         ESP_LOGW(TAG, "NVS: failed to persist active_profile (%s)",
