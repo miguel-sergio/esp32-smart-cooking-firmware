@@ -40,10 +40,15 @@ static bool nvs_has_credentials(void) {
     if (err != ESP_OK) {
         return false;
     }
-    size_t len = 0u;
-    err = nvs_get_str(nvs, PROV_NVS_KEY_SSID, NULL, &len);
+
+    size_t ssid_len = 0u;
+    size_t pass_len = 0u;
+    esp_err_t ssid_err = nvs_get_str(nvs, PROV_NVS_KEY_SSID, NULL, &ssid_len);
+    esp_err_t pass_err = nvs_get_str(nvs, PROV_NVS_KEY_PASS, NULL, &pass_len);
     nvs_close(nvs);
-    return (err == ESP_OK && len > 1u);
+
+    return (ssid_err == ESP_OK && ssid_len > 1u &&
+            pass_err == ESP_OK && pass_len > 1u);
 }
 
 static void nvs_save_credentials(const char *ssid, const char *pass) {
