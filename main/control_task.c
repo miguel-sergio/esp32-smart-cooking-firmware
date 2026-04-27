@@ -108,6 +108,16 @@ static const char *fault_name(fault_type_t f) {
     }
 }
 
+static const char *cmd_name(mqtt_cmd_type_t t) {
+    switch (t) {
+    case CMD_START: return "START";
+    case CMD_STOP:  return "STOP";
+    case CMD_ESTOP: return "ESTOP";
+    case CMD_RESET: return "RESET";
+    default:        return "UNKNOWN";
+    }
+}
+
 static void send_thermal_cmd(bool enabled, float setpoint) {
     if (s_cfg.thermal_q == NULL) {
         return;
@@ -392,6 +402,9 @@ static void control_task(void *arg) {
                 profile      = &s_profiles[pid];
                 active_fault = FAULT_NONE;
                 state        = COOKING_STATE_PREHEAT;
+            } else if (got_cmd && cmd.type != CMD_ESTOP) {
+                /* FR-09: reject and log commands not valid in this state */
+                ESP_LOGW(TAG, "CMD: %s rejected — not valid in IDLE", cmd_name(cmd.type));
             }
             break;
 
@@ -421,6 +434,9 @@ static void control_task(void *arg) {
             if (got_cmd && cmd.type == CMD_STOP) {
                 state = COOKING_STATE_IDLE;
                 break;
+            } else if (got_cmd && cmd.type != CMD_ESTOP) {
+                /* FR-09: reject and log commands not valid in this state */
+                ESP_LOGW(TAG, "CMD: %s rejected — not valid in PREHEAT", cmd_name(cmd.type));
             }
             /* Transition: preheat target reached */
             if (last_temp >= profile->preheat_target) {
@@ -454,6 +470,9 @@ static void control_task(void *arg) {
             if (got_cmd && cmd.type == CMD_STOP) {
                 state = COOKING_STATE_IDLE;
                 break;
+            } else if (got_cmd && cmd.type != CMD_ESTOP) {
+                /* FR-09: reject and log commands not valid in this state */
+                ESP_LOGW(TAG, "CMD: %s rejected — not valid in COOKING", cmd_name(cmd.type));
             }
             /* Transition: cook duration elapsed */
             if ((tick - cook_start_ms) >= profile->cook_duration_ms) {
@@ -466,6 +485,9 @@ static void control_task(void *arg) {
             if ((got_cmd && cmd.type == CMD_STOP) ||
                     (tick - done_start_ms) >= DONE_AUTORETURN_MS) {
                 state = COOKING_STATE_IDLE;
+            } else if (got_cmd && cmd.type != CMD_ESTOP) {
+                /* FR-09: reject and log commands not valid in this state */
+                ESP_LOGW(TAG, "CMD: %s rejected — not valid in DONE", cmd_name(cmd.type));
             }
             break;
 
@@ -473,6 +495,9 @@ static void control_task(void *arg) {
             if (got_cmd && cmd.type == CMD_RESET) {
                 active_fault = FAULT_NONE;
                 state        = COOKING_STATE_IDLE;
+            } else if (got_cmd && cmd.type != CMD_ESTOP) {
+                /* FR-09: reject and log commands not valid in this state */
+                ESP_LOGW(TAG, "CMD: %s rejected — not valid in ERROR", cmd_name(cmd.type));
             }
             break;
         }
