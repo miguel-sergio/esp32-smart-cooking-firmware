@@ -3,6 +3,7 @@
 [![Build](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/build.yml/badge.svg)](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/build.yml)
 [![Lint](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/lint.yml/badge.svg)](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/lint.yml)
 [![Tests](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/test.yml/badge.svg)](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/test.yml)
+[![Release](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/release.yml/badge.svg)](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/release.yml)
 
 Production-grade ESP32 firmware for a connected smart cooking appliance. The device controls a heating element and stirrer motor, monitors temperature and humidity in real time, and is operated remotely over MQTT. Built with [ESP-IDF v6.0](https://github.com/espressif/esp-idf).
 
@@ -320,7 +321,7 @@ idf.py build flash monitor
 
 ---
 
-## CI
+## CI/CD
 
 Every push and pull request runs three workflows:
 
@@ -330,10 +331,22 @@ Every push and pull request runs three workflows:
 | **Lint** | `cppcheck` (exhaustive) + `clang-tidy` via Espressif's Xtensa-aware LLVM build |
 | **Tests** | 34 host unit tests + driver test app build |
 
+### Release workflow
+
+Pushing/creating a `v*` tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`) triggers a full build + test run and then publishes a GitHub Release with the following assets:
+
+| Asset | Description |
+|-------|-------------|
+| `esp32-smart-cooking-firmware.bin` | Application binary — use this for OTA |
+| `esp32-smart-cooking-firmware.elf` | ELF with debug symbols |
+| `esp32-smart-cooking-firmware.map` | Linker map |
+| `bootloader.bin` | Bootloader binary |
+| `partition-table.bin` | Partition table |
+| `sdkconfig` | Build-time configuration snapshot |
+
 ---
 
 ## Future Work
 
 - **PID thermal control** — Replace the current bang-bang relay controller with a PID loop for tighter temperature regulation and elimination of overshoot, particularly relevant for the Delicate profile.
 - **Touch display (LVGL)** — Local UI on a capacitive touch screen using LVGL, allowing full appliance control and live telemetry without MQTT. Targets SPI-connected panels (e.g. ILI9341).
-- **CD pipeline for field updates** — Extend the existing CI with a release workflow that builds, signs, and publishes firmware binaries to a distribution endpoint on every tagged release, enabling automated over-the-air rollout to deployed devices via the existing MQTT OTA mechanism.
