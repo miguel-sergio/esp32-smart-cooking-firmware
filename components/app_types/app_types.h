@@ -6,6 +6,7 @@
 /* ── Cooking state machine ──────────────────────────────────────────────── */
 
 typedef enum {
+    COOKING_STATE_INVALID = -1,
     COOKING_STATE_IDLE,
     COOKING_STATE_PREHEAT,
     COOKING_STATE_COOKING,

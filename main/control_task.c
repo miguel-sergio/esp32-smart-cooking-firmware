@@ -1,5 +1,6 @@
 #include "control_task.h"
 #include "app_types.h"
+#include "cooking_logic.h"
 
 #include <stdio.h>
 
@@ -43,13 +44,6 @@ static const char *TAG = "ctrl";
  * (namespace "cooking", keys "profile_0" / "profile_1") so a future        *
  * milestone can update them over MQTT without a firmware rebuild.           */
 
-typedef struct {
-    float    preheat_target;    /* °C — transition PREHEAT → COOKING   */
-    float    cook_target;       /* °C — setpoint sent to thermal_task  */
-    float    safety_cutoff;     /* °C — OVERTEMP fault threshold       */
-    uint32_t cook_duration_ms;  /* ms  — COOKING → DONE timer          */
-    int8_t   motor_duty_pct;    /* %   — motor duty during cook cycle  */
-} cooking_profile_t;
 
 static const cooking_profile_t s_profiles[] = {
     [0] = {                         /* Profile 0 — Standard              */
@@ -108,6 +102,16 @@ static const char *fault_name(fault_type_t f) {
     }
 }
 
+static const char *cmd_name(mqtt_cmd_type_t t) {
+    switch (t) {
+    case CMD_START: return "START";
+    case CMD_STOP:  return "STOP";
+    case CMD_ESTOP: return "ESTOP";
+    case CMD_RESET: return "RESET";
+    default:        return "UNKNOWN";
+    }
+}
+
 static void send_thermal_cmd(bool enabled, float setpoint) {
     if (s_cfg.thermal_q == NULL) {
         return;
@@ -146,24 +150,6 @@ static void send_motor_cmd(int8_t duty_pct, bool brake) {
     }
 }
 
-/**
- * Consolidation helper: returns true when @p last_temp has been more than
- * 1 °C below @p target for HEAT_RISE_MS consecutive milliseconds.
- * Resets the window whenever temperature recovers above the threshold.
- */
-static bool check_heater_fail(float last_temp, float target, uint32_t tick,
-                               uint32_t *below_target_since_ms) {
-    if (last_temp < (target - 1.0f)) {
-        if (*below_target_since_ms == 0u) {
-            *below_target_since_ms = tick;   /* start consolidation window */
-        } else if ((tick - *below_target_since_ms) >= HEAT_RISE_MS) {
-            return true;
-        }
-    } else {
-        *below_target_since_ms = 0u;         /* recovered — reset window */
-    }
-    return false;
-}
 
 static void publish_state(cooking_state_t state, float temp, float humidity,
                           fault_type_t fault, uint8_t active_profile,
@@ -190,7 +176,7 @@ static void control_task(void *arg) {
     (void)arg;
 
     cooking_state_t          state        = COOKING_STATE_IDLE;
-    cooking_state_t          prev_state   = (cooking_state_t)-1;
+    cooking_state_t          prev_state   = COOKING_STATE_INVALID;
     fault_type_t             active_fault = FAULT_NONE;
     const cooking_profile_t *profile      = &s_profiles[0];
 
@@ -321,17 +307,65 @@ static void control_task(void *arg) {
         mqtt_cmd_t cmd     = {0};
         bool       got_cmd = (xQueueReceive(s_cfg.cmd_q, &cmd, 0) == pdTRUE);
 
-        /* ESTOP is immediate and unconditional — always latch FAULT_ESTOP so
-         * telemetry reflects the most recent safety event, even if already
-         * in ERROR due to a different fault. */
-        if (got_cmd && cmd.type == CMD_ESTOP) {
-            active_fault = FAULT_ESTOP;
-            state        = COOKING_STATE_ERROR;
+        /* ── 3. Pure state transition (logic extracted to cooking_logic) ── */
+        {
+            cooking_transition_input_t tr_in = {
+                .current_state         = state,
+                .current_fault         = active_fault,
+                .got_cmd               = got_cmd,
+                .cmd_type              = cmd.type,
+                .last_temp             = last_temp,
+                .tick_ms               = tick,
+                .last_temp_ms          = last_temp_ms,
+                .cook_start_ms         = cook_start_ms,
+                .done_start_ms         = done_start_ms,
+                .below_target_since_ms = below_target_since_ms,
+                .preheat_target        = profile->preheat_target,
+                .cook_target           = profile->cook_target,
+                .safety_cutoff         = profile->safety_cutoff,
+                .cook_duration_ms      = profile->cook_duration_ms,
+                .sensor_timeout_ms     = SENSOR_TIMEOUT_MS,
+                .done_autoreturn_ms    = DONE_AUTORETURN_MS,
+                .heat_rise_ms          = HEAT_RISE_MS,
+            };
+            cooking_transition_output_t tr_out = cooking_logic_next_state(&tr_in);
+
+            /* FR-09: log commands that are not valid in the current state */
+            if (tr_out.cmd_rejected) {
+                ESP_LOGW(TAG, "CMD: %s rejected — not valid in %s",
+                         cmd_name(cmd.type), state_name(state));
+            }
+
+            below_target_since_ms = tr_out.below_target_since_ms;
+            state                 = tr_out.next_state;
+            active_fault          = tr_out.next_fault;
         }
 
-        /* ── 3. State entry actions — run once per transition ───────────── */
+        /* ── 4. State entry actions — run once per transition ───────────── */
         if (state != prev_state) {
             ESP_LOGI(TAG, "State \xe2\x86\x92 %s", state_name(state));
+
+            /* CMD_START profile selection side effect (IDLE → PREHEAT only) */
+            if (state == COOKING_STATE_PREHEAT &&
+                    prev_state == COOKING_STATE_IDLE) {
+                uint8_t pid = (cmd.profile_id < (uint8_t)ARRAY_SIZE(s_profiles))
+                              ? cmd.profile_id : 0u;
+                /* Persist selected profile only when it actually changes to
+                 * avoid unnecessary NVS writes and flash wear. */
+                if (nvs_ok && pid != persisted_pid) {
+                    esp_err_t err = nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, pid);
+                    if (err == ESP_OK) { err = nvs_commit(nvs); }
+                    if (err == ESP_OK) {
+                        ESP_LOGI(TAG, "NVS: active_profile %u \xe2\x86\x92 %u persisted",
+                                 (unsigned)persisted_pid, (unsigned)pid);
+                        persisted_pid = pid;
+                    } else {
+                        ESP_LOGW(TAG, "NVS: failed to persist active_profile (%s)",
+                                 esp_err_to_name(err));
+                    }
+                }
+                profile = &s_profiles[pid];
+            }
 
             switch (state) {
             case COOKING_STATE_IDLE:
@@ -340,15 +374,15 @@ static void control_task(void *arg) {
                 break;
 
             case COOKING_STATE_PREHEAT:
-                last_temp_ms          = tick;  /* reset timeout grace period */
-                below_target_since_ms = 0u;
+                last_temp_ms          = tick;  /* reset sensor-timeout grace period */
+                below_target_since_ms = 0u;    /* reset heater-fail window          */
                 send_thermal_cmd(true, profile->preheat_target);
                 send_motor_cmd(0, false);
                 break;
 
             case COOKING_STATE_COOKING:
                 cook_start_ms         = tick;
-                below_target_since_ms = 0u;
+                below_target_since_ms = 0u;    /* reset heater-fail window          */
                 send_thermal_cmd(true, profile->cook_target);
                 send_motor_cmd(profile->motor_duty_pct, false);
                 break;
@@ -364,122 +398,18 @@ static void control_task(void *arg) {
                 send_motor_cmd(0, true);       /* brake = true */
                 ESP_LOGE(TAG, "Fault: %s", fault_name(active_fault));
                 break;
+
+            case COOKING_STATE_INVALID:
+                /* Should never occur; skip to avoid unintended commands. */
+                break;
             }
 
             prev_state = state;
         }
 
-        /* ── 4. Per-state logic and transitions ─────────────────────────── */
-        switch (state) {
-        case COOKING_STATE_IDLE:
-            if (got_cmd && cmd.type == CMD_START) {
-                uint8_t pid = (cmd.profile_id < (uint8_t)ARRAY_SIZE(s_profiles))
-                              ? cmd.profile_id : 0u;
-                /* Persist selected profile only when it actually changes to
-                 * avoid unnecessary NVS writes and flash wear. */
-                if (nvs_ok && pid != persisted_pid) {
-                    esp_err_t err = nvs_set_u8(nvs, NVS_KEY_ACTIVE_PROF, pid);
-                    if (err == ESP_OK) { err = nvs_commit(nvs); }
-                    if (err == ESP_OK) {
-                        ESP_LOGI(TAG, "NVS: active_profile %u → %u persisted",
-                                 (unsigned)persisted_pid, (unsigned)pid);
-                        persisted_pid = pid;
-                    } else {
-                        ESP_LOGW(TAG, "NVS: failed to persist active_profile (%s)",
-                                 esp_err_to_name(err));
-                    }
-                }
-                profile      = &s_profiles[pid];
-                active_fault = FAULT_NONE;
-                state        = COOKING_STATE_PREHEAT;
-            }
-            break;
-
-        case COOKING_STATE_PREHEAT:
-            /* Fault: sensor timeout */
-            if ((tick - last_temp_ms) > SENSOR_TIMEOUT_MS) {
-                active_fault = FAULT_SENSOR_TIMEOUT;
-                state        = COOKING_STATE_ERROR;
-                break;
-            }
-            /* Fault: overtemp */
-            if (last_temp > profile->safety_cutoff) {
-                active_fault = FAULT_OVERTEMP;
-                state        = COOKING_STATE_ERROR;
-                break;
-            }
-            /* Fault: temperature below preheat target for 2 consecutive minutes.
-             * The consolidation window resets whenever temperature recovers.
-             * This detects heater failure at any point during the preheat cycle. */
-            if (check_heater_fail(last_temp, profile->preheat_target, tick,
-                                  &below_target_since_ms)) {
-                active_fault = FAULT_HEATER_FAIL;
-                state        = COOKING_STATE_ERROR;
-                break;
-            }
-            /* Operator abort */
-            if (got_cmd && cmd.type == CMD_STOP) {
-                state = COOKING_STATE_IDLE;
-                break;
-            }
-            /* Transition: preheat target reached */
-            if (last_temp >= profile->preheat_target) {
-                state = COOKING_STATE_COOKING;
-            }
-            break;
-
-        case COOKING_STATE_COOKING:
-            /* Fault: sensor timeout */
-            if ((tick - last_temp_ms) > SENSOR_TIMEOUT_MS) {
-                active_fault = FAULT_SENSOR_TIMEOUT;
-                state        = COOKING_STATE_ERROR;
-                break;
-            }
-            /* Fault: overtemp */
-            if (last_temp > profile->safety_cutoff) {
-                active_fault = FAULT_OVERTEMP;
-                state        = COOKING_STATE_ERROR;
-                break;
-            }
-            /* Fault: temperature below cook target for 2 consecutive minutes.
-             * The consolidation window resets whenever temperature recovers.
-             * This detects heater failure at any point during the cook cycle. */
-            if (check_heater_fail(last_temp, profile->cook_target, tick,
-                                  &below_target_since_ms)) {
-                active_fault = FAULT_HEATER_FAIL;
-                state        = COOKING_STATE_ERROR;
-                break;
-            }
-            /* Operator abort */
-            if (got_cmd && cmd.type == CMD_STOP) {
-                state = COOKING_STATE_IDLE;
-                break;
-            }
-            /* Transition: cook duration elapsed */
-            if ((tick - cook_start_ms) >= profile->cook_duration_ms) {
-                state = COOKING_STATE_DONE;
-            }
-            break;
-
-        case COOKING_STATE_DONE:
-            /* SRD: return to IDLE on explicit STOP or after 60 s */
-            if ((got_cmd && cmd.type == CMD_STOP) ||
-                    (tick - done_start_ms) >= DONE_AUTORETURN_MS) {
-                state = COOKING_STATE_IDLE;
-            }
-            break;
-
-        case COOKING_STATE_ERROR:
-            if (got_cmd && cmd.type == CMD_RESET) {
-                active_fault = FAULT_NONE;
-                state        = COOKING_STATE_IDLE;
-            }
-            break;
-        }
-
         /* ── 5. Publish current state to comms_task ─────────────────────── */
         /* Derive current motor duty from profile when in COOKING, else 0. */
-        last_motor_duty = (state == COOKING_STATE_COOKING) ? profile->motor_duty_pct : 0;
+        last_motor_duty = (int8_t)((state == COOKING_STATE_COOKING) ? profile->motor_duty_pct : 0);
         publish_state(state, last_temp, last_humidity, active_fault,
                       (uint8_t)(profile - s_profiles), last_motor_duty);
 

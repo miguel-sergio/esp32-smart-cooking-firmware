@@ -1,0 +1,32 @@
+# clang-tidy configuration for ESP32 embedded C firmware
+#
+# Goal:
+# - Catch real firmware bugs
+# - Avoid noisy generic C/C++ style rules
+# - Avoid false positives from ESP-IDF / FreeRTOS headers
+# - Keep CI strict, but useful
+
+Checks: >
+  -*,
+  clang-analyzer-core.*,
+  clang-analyzer-unix.*,
+  clang-analyzer-deadcode.*,
+  clang-analyzer-security.*,
+  clang-analyzer-optin.core.EnumCastOutOfRange,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  readability-non-const-parameter,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -bugprone-not-null-terminated-result,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-branch-clone
+
+WarningsAsErrors: '*'
+
+HeaderFilterRegex: '^.*/(main|components/(app_types|bme280|drv8833|comms|ota|provisioning))/.*'
+
+CheckOptions:
+  - key: readability-non-const-parameter.WarnPointersAsValues
+    value: 'false'

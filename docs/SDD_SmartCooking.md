@@ -99,6 +99,8 @@ graph TD
 
 **Traces:** NFR-01, NFR-02
 
+> **NFR-01 exception — ota_task:** The OTA task is intentionally excluded from the task watchdog. It runs only when the cooking cycle is inactive (IDLE/DONE/ERROR), so a hang carries no actuator safety risk. `esp_https_ota()` can legitimately block for 30–120 s on slow links, far exceeding the 5 s TWDT timeout — a mid-download reset is indistinguishable from a real hang. The HTTP socket timeout (30 000 ms) is the hang guard: a server stall returns a clean error and the task waits for a corrected URL. 30 s is conservative enough for TCP retransmissions on poor Wi-Fi and is not constrained by the TWDT timeout. This matches Espressif's own OTA examples.
+
 ---
 
 ## 5. Cooking state machine

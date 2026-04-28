@@ -51,10 +51,11 @@ static void load_calib(bme280_calib_t *c, const uint8_t *b1, const uint8_t *b2) 
 
     c->H2 = LE16S(b2, 0);
     c->H3 = b2[2];
-    /* 0xE4[7:0] = H4[11:4], 0xE5[3:0] = H4[3:0] — cast to int8_t first for sign extension */
-    c->H4 = ((int16_t)(int8_t)b2[3] << 4) | (b2[4] & 0x0F);
+    /* 0xE4[7:0] = H4[11:4], 0xE5[3:0] = H4[3:0] — cast to int8_t first for sign extension.
+     * Outer (int16_t) truncates the int result of the OR back to 16 bits — value fits. */
+    c->H4 = (int16_t)(((int16_t)(int8_t)b2[3] << 4) | (b2[4] & 0x0F));
     /* 0xE6[7:0] = H5[11:4], 0xE5[7:4] = H5[3:0] */
-    c->H5 = ((int16_t)(int8_t)b2[5] << 4) | (b2[4] >> 4);
+    c->H5 = (int16_t)(((int16_t)(int8_t)b2[5] << 4) | (b2[4] >> 4));
     c->H6 = (int8_t)b2[6];
 }
 
@@ -179,18 +180,18 @@ esp_err_t bme280_read(bme280_dev_t *dev, bme280_data_t *out) {
     uint8_t raw[8];
     ESP_RETURN_ON_ERROR(reg_read(dev, REG_DATA, raw, sizeof(raw)), TAG, "read data failed");
 
-    int32_t adc_P = ((int32_t)raw[0] << 12) | ((int32_t)raw[1] << 4) | (raw[2] >> 4);
-    int32_t adc_T = ((int32_t)raw[3] << 12) | ((int32_t)raw[4] << 4) | (raw[5] >> 4);
-    int32_t adc_H = ((int32_t)raw[6] <<  8) |  raw[7];
+    int32_t adc_p = ((int32_t)raw[0] << 12) | ((int32_t)raw[1] << 4) | (raw[2] >> 4);
+    int32_t adc_t = ((int32_t)raw[3] << 12) | ((int32_t)raw[4] << 4) | (raw[5] >> 4);
+    int32_t adc_h = ((int32_t)raw[6] <<  8) |  raw[7];
 
     int32_t  t_fine;
-    int32_t  T = comp_temp    (&dev->calib, adc_T, &t_fine);
-    uint32_t P = comp_pressure(&dev->calib, adc_P, t_fine);
-    uint32_t H = comp_humidity(&dev->calib, adc_H, t_fine);
+    int32_t  t_raw = comp_temp    (&dev->calib, adc_t, &t_fine);
+    uint32_t p_raw = comp_pressure(&dev->calib, adc_p, t_fine);
+    uint32_t h_raw = comp_humidity(&dev->calib, adc_h, t_fine);
 
-    out->temperature = T / 100.0f;           /* 0.01 °C  → °C   */
-    out->pressure    = P / 256.0f / 100.0f;  /* Q24.8 Pa → hPa  */
-    out->humidity    = H / 1024.0f;          /* Q22.10   → %RH  */
+    out->temperature = (float)t_raw / 100.0f;           /* 0.01 °C  → °C   */
+    out->pressure    = (float)p_raw / 256.0f / 100.0f;  /* Q24.8 Pa → hPa  */
+    out->humidity    = (float)h_raw / 1024.0f;          /* Q22.10   → %RH  */
     return ESP_OK;
 }
 
