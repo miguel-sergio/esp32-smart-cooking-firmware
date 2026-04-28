@@ -37,6 +37,11 @@ jobs:
             -DCONFIG_SMART_COOKING_MQTT_BROKER_URI="$MQTT_BROKER_URI" \
             build
 
+      - name: Force MQTT URI in sdkconfig
+        run: |
+          sed -i 's|^CONFIG_SMART_COOKING_MQTT_BROKER_URI=.*$|CONFIG_SMART_COOKING_MQTT_BROKER_URI="'$MQTT_BROKER_URI'"|' build/sdkconfig
+          grep MQTT_BROKER_URI build/sdkconfig
+
       - name: Show firmware size
         run: |
           . /opt/esp/idf/export.sh
