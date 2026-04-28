@@ -49,13 +49,6 @@ static const char *TAG = "comms";
 #define TELEM_INTERVAL_ACTIVE_MS   1000u   /*  1 Hz — PREHEAT / COOKING / DONE / ERROR */
 #define TELEM_INTERVAL_IDLE_MS    10000u   /* 0.1 Hz — IDLE */
 
-/* OTA MQTT verification timeout (FR-10): if a freshly flashed firmware in
- * PENDING_VERIFY state does not achieve an MQTT connection within this window
- * the broker URI is likely misconfigured and the firmware rolls back
- * automatically, restoring the last known-good image. */
-#define OTA_MQTT_VERIFY_TIMEOUT_S   60
-#define OTA_MQTT_VERIFY_TIMEOUT_US  ((int64_t)OTA_MQTT_VERIFY_TIMEOUT_S * 1000000LL)
-
 /* NVS key for the runtime-configurable MQTT broker URI.
  * Namespace: "sc_config", key: "mqtt_uri".
  * Written at manufacturing or via a field provisioning tool.
@@ -105,9 +98,15 @@ static volatile bool       s_restart_pending = false;
  * or for the operator to issue STOP/ESTOP.  Safe to wait indefinitely. */
 static volatile bool       s_graceful_restart_pending = false;
 
-/* Set to true on the first MQTT_EVENT_CONNECTED.  Used by the OTA rollback
- * guard to confirm that the new firmware can reach the configured broker. */
+/* Set to true on the first MQTT_EVENT_CONNECTED.  Used by the candidate URI
+ * validation deadline to confirm the new broker is reachable. */
 static volatile bool       s_mqtt_connected  = false;
+
+/* Set to true on IP_EVENT_STA_GOT_IP.  Used to trigger OTA firmware
+ * validation: Wi-Fi connect is the validation point (not MQTT) because
+ * the golden NVS URI guarantees MQTT connectivity on every boot, making
+ * an MQTT-based guard a no-op discriminator. */
+static volatile bool       s_wifi_validated  = false;
 
 /* Set to true when the device boots using a candidate URI (written by a
  * cooking/config command but not yet confirmed reachable).  Cleared once
@@ -154,6 +153,31 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
         s_retry_count = 0u;
         provisioning_on_wifi_success();
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
+
+        /* OTA boot self-check (NFR-05): validate new firmware on Wi-Fi connect.
+         *
+         * Validation is triggered here rather than at MQTT_EVENT_CONNECTED because
+         * the device stores a golden broker URI in NVS that always connects —
+         * making MQTT connect a guaranteed event that cannot discriminate between
+         * a good and a bad firmware image.
+         *
+         * Wi-Fi success proves: NVS readable (credentials survived OTA),
+         * RF + TCP/IP stack functional, and FreeRTOS tasks running.
+         * That is sufficient evidence that the new image is healthy. */
+        s_wifi_validated = true;
+        {
+            const esp_partition_t *running = esp_ota_get_running_partition();
+            esp_ota_img_states_t   ota_state;
+            if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+                ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+                esp_err_t err_v = esp_ota_mark_app_valid_cancel_rollback();
+                if (err_v == ESP_OK) {
+                    ESP_LOGI(TAG, "OTA: new firmware validated on Wi-Fi connect — rollback cancelled");
+                } else {
+                    ESP_LOGE(TAG, "OTA: failed to validate new firmware: %s", esp_err_to_name(err_v));
+                }
+            }
+        }
     }
 }
 
@@ -398,25 +422,6 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             s_uri_candidate_pending = false;
         }
 
-        /* Boot self-check: Wi-Fi + MQTT connected → mark firmware valid (FR-10, NFR-05).
-         * Only acts when running from a freshly flashed OTA partition pending
-         * verification; no-op on normal boot or after already marked valid.
-         * NOTE: on a device with an active NVS URI, a new OTA firmware will
-         * use that URI and connect normally — this guard is only needed for
-         * fresh devices (no NVS URI) where the compiled default is used. */
-        {
-            const esp_partition_t *running = esp_ota_get_running_partition();
-            esp_ota_img_states_t   ota_state;
-            if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
-                ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-                esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-                if (err == ESP_OK) {
-                    ESP_LOGI(TAG, "OTA: new firmware validated — rollback cancelled");
-                } else {
-                    ESP_LOGE(TAG, "OTA: failed to validate new firmware: %s", esp_err_to_name(err));
-                }
-            }
-        }
         break;
 
     case MQTT_EVENT_DISCONNECTED:
@@ -548,22 +553,6 @@ static void comms_task(void *arg) {
 
     esp_mqtt_client_handle_t mqtt_client = mqtt_init();
 
-    /* OTA rollback guard: only relevant on fresh devices (no NVS URI) where
-     * the compiled default URI is used.  On devices with an active NVS URI
-     * the new firmware uses that URI and connects normally — no rollback
-     * needed.  Set a deadline to detect a bad compiled URI at first flash. */
-    int64_t rollback_deadline_us = 0;
-    {
-        const esp_partition_t *running = esp_ota_get_running_partition();
-        esp_ota_img_states_t   ota_state;
-        if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
-            ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-            rollback_deadline_us = esp_timer_get_time() + OTA_MQTT_VERIFY_TIMEOUT_US;
-            ESP_LOGI(TAG, "OTA: PENDING_VERIFY — MQTT must connect within %d s or rollback",
-                     OTA_MQTT_VERIFY_TIMEOUT_S);
-        }
-    }
-
     /* Candidate URI validation deadline: if this boot is using a candidate
      * URI and MQTT does not connect in time, discard the candidate and
      * restart — the device will use the previous active URI on next boot. */
@@ -589,16 +578,6 @@ static void comms_task(void *arg) {
 
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
-
-        /* OTA rollback guard (fresh device / no NVS URI): trigger automatic
-         * rollback if MQTT did not connect within the deadline. */
-        if (rollback_deadline_us != 0 && !s_mqtt_connected &&
-            esp_timer_get_time() >= rollback_deadline_us) {
-            ESP_LOGE(TAG, "OTA: MQTT did not connect within %d s — rolling back to previous image",
-                     OTA_MQTT_VERIFY_TIMEOUT_S);
-            esp_ota_mark_app_invalid_rollback_and_reboot();
-            /* not reached */
-        }
 
         /* Candidate URI validation: if MQTT did not connect within the
          * deadline the candidate broker is unreachable.  Discard the

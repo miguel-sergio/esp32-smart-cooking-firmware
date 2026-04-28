@@ -48,7 +48,6 @@ jobs:
             build/bootloader/*.bin
             build/partition_table/*.bin
             build/compile_commands.json
-            sdkconfig
           if-no-files-found: error
 
   # ── 2. Unit tests ──────────────────────────────────────────────────────────
@@ -178,10 +177,12 @@ jobs:
           name: esp32-firmware
           path: release-assets/firmware
 
+      - name: List downloaded artefacts
+        run: find release-assets/firmware -type f | sort
+
       - name: Prepare OTA binary
-        # download-artifact preserves the build/ subdirectory from the upload path.
         run: |
-          cp release-assets/firmware/build/esp32-smart-cooking-firmware.bin \
+          cp release-assets/firmware/esp32-smart-cooking-firmware.bin \
              esp32-smart-cooking-firmware.bin
 
       - name: Create GitHub Release
@@ -194,8 +195,7 @@ jobs:
           generate_release_notes: true
           files: |
             esp32-smart-cooking-firmware.bin
-            release-assets/firmware/build/esp32-smart-cooking-firmware.elf
-            release-assets/firmware/build/esp32-smart-cooking-firmware.map
-            release-assets/firmware/build/bootloader/bootloader.bin
-            release-assets/firmware/build/partition_table/partition-table.bin
-            release-assets/firmware/sdkconfig
+            release-assets/firmware/esp32-smart-cooking-firmware.elf
+            release-assets/firmware/esp32-smart-cooking-firmware.map
+            release-assets/firmware/bootloader/bootloader.bin
+            release-assets/firmware/partition_table/partition-table.bin

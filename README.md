@@ -16,11 +16,20 @@ This project was developed as a complete embedded firmware deliverable — from 
 ## Features
 
 - **Thermal control** — Bang-bang relay controller with configurable setpoints, hysteresis, and safety cutoff. Sensor-timeout and heater-fail faults trip the system to a safe state automatically.
-- **Motor control** — DRV8833 dual H-bridge driver with smooth PWM ramp-up/ramp-down and active brake on emergency stop.
+- **Motor control** — DRV8833 dual H-bridge driver with smooth PWM ramp-up (2 s to target duty) and ramp-down (1 s to stop). Active brake on emergency stop; no abrupt starts or stops under any normal condition.
 - **MQTT connectivity** — Real-time telemetry (temperature, humidity, state, motor duty) published at 1 Hz during active cycles and 0.1 Hz at idle. Commands (`START`, `STOP`, `ESTOP`, `RESET`) received via a dedicated topic.
 - **BLE provisioning** — First-boot Wi-Fi setup via Blufi with DH key exchange + AES-256-CTR encryption. BLE stack is fully torn down once credentials are saved. If Wi-Fi connection fails after 3 consecutive attempts, the device automatically re-enters provisioning mode — no physical intervention required.
 - **OTA updates** — Firmware upgrades over HTTPS with TLS server verification triggered via MQTT. Updates are deferred until the cooking cycle is inactive; rollback activates automatically if the new firmware fails to connect.
-- **Cooking profiles** — Two built-in profiles (Standard, Delicate) stored in NVS. Profiles are independently upgradeable over MQTT without a firmware rebuild.
+- **Cooking profiles** — Two built-in profiles (Standard, Delicate) stored in NVS. Profile selection is remote-controllable via MQTT; parameters survive all OTA updates.
+
+  | Parameter | Profile 0 — Standard | Profile 1 — Delicate |
+  |-----------|----------------------|----------------------|
+  | Preheat target | 60 °C | 45 °C |
+  | Cook target | 80 °C | 60 °C |
+  | Safety cutoff | 95 °C | 75 °C |
+  | Cook duration | 30 min | 20 min |
+  | Motor duty | 60 % | 40 % |
+
 - **Watchdog** — Task watchdog registered on all real-time tasks. `ota_task` is intentionally excluded (long download times are expected; a socket timeout guards against hangs instead).
 - **Structured logging** — Every state transition, fault event, and command is logged via UART using ESP-IDF log levels (ERROR, WARN, INFO, DEBUG) with millisecond timestamps.
 
@@ -194,6 +203,9 @@ Interruptive operations (OTA update, Wi-Fi max-retry recovery) are never execute
 ### Typed queues as the sole inter-task interface
 Each task owns its own state exclusively. All data flow between tasks is explicit, unidirectional, and typed — there is no shared global state. This makes data flow auditable at a glance, eliminates a category of race conditions, and means each task can be reasoned about in isolation. The tradeoff is a small amount of boilerplate in queue definitions and config structs.
 
+### OTA firmware validated at Wi-Fi connect, not MQTT
+The ESP-IDF OTA rollback mechanism marks a new firmware image valid by calling `esp_ota_mark_app_valid_cancel_rollback()` after a successful self-check. The natural candidate for this check is MQTT connection — but the device stores a golden broker URI in NVS that is guaranteed to connect on every boot, which makes an MQTT-based guard a no-op: the new firmware would always be marked valid regardless of its actual health. Wi-Fi connect (`IP_EVENT_STA_GOT_IP`) is a stronger and independent validation point: it proves that NVS is readable (credentials survived the OTA), the RF and TCP/IP stack initialised correctly, and all FreeRTOS tasks started — without relying on any external service. The tradeoff is that a firmware with a broken MQTT stack would still be marked valid; this is acceptable because MQTT failures are recoverable at runtime without a rollback.
+
 ### MQTT broker URI stored in NVS, not compiled in
 The address of the cloud broker is stored on-device in NVS (flash), independently of the firmware binary. At first flash, the device uses the address compiled into the release build by the CI pipeline (injected as a secret, never in source code). Once provisioned in the field, the NVS value takes priority on every subsequent boot — meaning OTA firmware updates never overwrite the production broker address. The tradeoff is a one-time factory setup step to write the NVS key before the device ships.
 
@@ -215,7 +227,7 @@ Every device goes through a one-time setup before it ships:
 
 After these four steps the device is ready to ship. No further physical access is required.
 
-### Remote broker migration (post-deployment)
+### Remote broker URL migration (post-deployment)
 
 If the cloud broker address changes after devices are in the field, it can be updated remotely without a firmware update or physical access. Publish the new address to the `cooking/config` topic:
 
@@ -248,7 +260,28 @@ flowchart TD
 
 ### OTA firmware updates
 
-New firmware is delivered remotely by publishing a download URL to the `cooking/ota` topic. The update is deferred until the current cooking cycle finishes (the appliance is never interrupted mid-cook), then downloaded over HTTPS, verified, and applied. If the new firmware fails to connect to the broker, the bootloader automatically rolls back to the previous version.
+New firmware is delivered remotely by publishing a download URL to the `cooking/ota` topic. The update is deferred until the current cooking cycle finishes (the appliance is never interrupted mid-cook), then downloaded over HTTPS, verified, and applied. If the new firmware crashes before Wi-Fi connects, the bootloader automatically rolls back to the previous partition on the next boot.
+
+```mermaid
+flowchart TD
+    A(["Device running"]) --> B["Operator publishes firmware URL<br/>to cooking/ota"]
+    B --> C{"Cooking cycle active?"}
+    C -->|Yes| D["URL queued —<br/>waits for IDLE / DONE / ERROR"]
+    D --> E["Download firmware via HTTPS<br/>(TLS server verified)"]
+    C -->|No| E
+    E --> F["Write to inactive OTA partition"]
+    F --> G(["Device restarts"])
+    G --> H{"Wi-Fi connects<br/>(IP obtained)?"}
+    H -->|Yes| I["Firmware marked valid<br/>(rollback cancelled)"]
+    H -->|No — crash / WDT| J["Bootloader detects PENDING_VERIFY<br/>→ rolls back to previous partition"]
+    I --> K(["Running new firmware ✓"])
+    J --> L(["Running previous firmware ✓"])
+
+    style I fill:#e9f7ef,stroke:#58b07c,color:#2d2d2d
+    style K fill:#e9f7ef,stroke:#58b07c,color:#2d2d2d
+    style J fill:#fdf0e6,stroke:#d4845a,color:#2d2d2d
+    style L fill:#fdf0e6,stroke:#d4845a,color:#2d2d2d
+```
 
 ### Production vs development builds
 
@@ -313,6 +346,7 @@ The CI pipeline always produces a production build when a release tag is pushed.
 │   └── provisioning/       # Blufi provisioning + PSA Crypto security layer
 │
 └── test_apps/
+    ├── unity/              # Host-side unit tests (34 tests, ESP-IDF Linux target)
     └── drivers/            # On-device hardware validation app (BME280 + DRV8833)
 ```
 
@@ -335,6 +369,42 @@ idf.py build flash monitor
 ```
 
 On first boot the device enters BLE provisioning mode and advertises as `SmartCooking`. Use the ESP Blufi app (iOS/Android) to send Wi-Fi credentials. Credentials are saved to NVS; subsequent boots connect automatically.
+
+---
+
+## MQTT Reference
+
+All payloads use JSON.
+
+### Telemetry (device → broker)
+
+| Topic | Rate | Payload fields |
+|-------|------|----------------|
+| `cooking/telemetry` | 1 Hz (active cycle) · 0.1 Hz (IDLE) | `temp`, `humidity`, `phase`, `motor_duty`, `profile`, `fault` |
+| `cooking/fault` | On fault event only | `fault`, `last_temp`, `timestamp_ms` |
+
+**Example `cooking/telemetry` payload:**
+```json
+{"temp": 74.3, "humidity": 42.1, "phase": "PREHEAT", "motor_duty": 0, "profile": 0, "fault": "NONE"}
+```
+
+`phase` values: `IDLE` · `PREHEAT` · `COOKING` · `DONE` · `ERROR`
+
+`fault` values: `NONE` · `OVERTEMP` · `SENSOR_TIMEOUT` · `HEATER_FAIL` · `ESTOP`
+
+### Telecommands (broker → device)
+
+| Topic | Payload | Action |
+|-------|---------|--------|
+| `cooking/cmd` | `{"cmd": "START", "profile_id": 0}` | Start cycle with Standard profile |
+| `cooking/cmd` | `{"cmd": "START", "profile_id": 1}` | Start cycle with Delicate profile |
+| `cooking/cmd` | `{"cmd": "STOP"}` | Stop active cycle, return to IDLE |
+| `cooking/cmd` | `{"cmd": "ESTOP"}` | Emergency stop — transition to ERROR immediately |
+| `cooking/cmd` | `{"cmd": "RESET"}` | Clear ERROR state, return to IDLE |
+| `cooking/ota` | `https://example.com/firmware.bin` | Trigger OTA update (plain text URL, not JSON) |
+| `cooking/config` | `{"mqtt_uri": "mqtt://new-broker.example.com:1883"}` | Migrate broker address (two-phase commit — see [Deployment](#deployment)) |
+
+Commands received in incompatible states are rejected and logged — no silent ignoring.
 
 ---
 
@@ -378,6 +448,10 @@ idf.py build
 
 <img src="docs/assets/unit-test-report.png" width="700" alt="Unit test report">
 
+**OTA rollback verification (on-device)**
+
+Automatic rollback was verified end-to-end by flashing a deliberately corrupted firmware image via the OTA pipeline. The bootloader detected the `PENDING_VERIFY` state on next boot, found no valid self-check call, and restored the previous working partition automatically — confirmed via serial monitor log.
+
 **Driver validation app (on-device)**
 
 Validates the BME280 and DRV8833 drivers against live hardware. Reads 5 BME280 samples and checks they fall within the sensor's physical operating range; ramps DRV8833 Channel A through a speed sequence.
@@ -410,7 +484,6 @@ Pushing/creating a `v*` tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`) tr
 | `esp32-smart-cooking-firmware.map` | Linker map |
 | `bootloader.bin` | Bootloader binary |
 | `partition-table.bin` | Partition table |
-| `sdkconfig` | Build-time configuration snapshot |
 
 ---
 
