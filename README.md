@@ -17,10 +17,11 @@ This project was developed as a complete embedded firmware deliverable — from 
 - **Thermal control** — Bang-bang relay controller with configurable setpoints, hysteresis, and safety cutoff. Sensor-timeout and heater-fail faults trip the system to a safe state automatically.
 - **Motor control** — DRV8833 dual H-bridge driver with smooth PWM ramp-up/ramp-down and active brake on emergency stop.
 - **MQTT connectivity** — Real-time telemetry (temperature, humidity, state, motor duty) published at 1 Hz during active cycles and 0.1 Hz at idle. Commands (`START`, `STOP`, `ESTOP`, `RESET`) received via a dedicated topic.
-- **BLE provisioning** — First-boot Wi-Fi setup via Blufi with DH key exchange + AES-256-CTR encryption. BLE stack is fully torn down once credentials are saved.
+- **BLE provisioning** — First-boot Wi-Fi setup via Blufi with DH key exchange + AES-256-CTR encryption. BLE stack is fully torn down once credentials are saved. If Wi-Fi connection fails after 3 consecutive attempts, the device automatically re-enters provisioning mode — no physical intervention required.
 - **OTA updates** — Firmware upgrades over HTTPS with TLS server verification triggered via MQTT. Updates are deferred until the cooking cycle is inactive; rollback activates automatically if the new firmware fails to connect.
 - **Cooking profiles** — Two built-in profiles (Standard, Delicate) stored in NVS. Profiles are independently upgradeable over MQTT without a firmware rebuild.
 - **Watchdog** — Task watchdog registered on all real-time tasks. `ota_task` is intentionally excluded (long download times are expected; a socket timeout guards against hangs instead).
+- **Structured logging** — Every state transition, fault event, and command is logged via UART using ESP-IDF log levels (ERROR, WARN, INFO, DEBUG) with millisecond timestamps.
 
 ---
 
