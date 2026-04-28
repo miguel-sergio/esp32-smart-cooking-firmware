@@ -18,29 +18,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug MQTT_BROKER_URI value
-        env:
-          MQTT_BROKER_URI: ${{ secrets.MQTT_BROKER_URI }}
-        run: |
-          echo "[DEBUG] MQTT_BROKER_URI is: $MQTT_BROKER_URI"
-
       - name: Build firmware
         # MQTT_BROKER_URI is injected from GitHub Actions Secrets at build time.
-        # This sets the compile-time default URI baked into the release binary.
+        # Written to a temporary sdkconfig.defaults.ci overlay so ESP-IDF picks
+        # it up reliably (cmake -DCONFIG_* does not override sdkconfig values).
         # At runtime, NVS key "sc_config/mqtt_uri" takes precedence if present.
         env:
           MQTT_BROKER_URI: ${{ secrets.MQTT_BROKER_URI }}
         run: |
           . /opt/esp/idf/export.sh
+          echo "CONFIG_SMART_COOKING_MQTT_BROKER_URI=\"${MQTT_BROKER_URI}\"" > sdkconfig.defaults.ci
           idf.py \
-            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" \
-            -DCONFIG_SMART_COOKING_MQTT_BROKER_URI="$MQTT_BROKER_URI" \
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.defaults.ci" \
             build
 
-      - name: Force MQTT URI in sdkconfig
+      - name: Verify baked-in MQTT URI (does not expose secret value)
         run: |
-          sed -i 's|^CONFIG_SMART_COOKING_MQTT_BROKER_URI=.*$|CONFIG_SMART_COOKING_MQTT_BROKER_URI="'$MQTT_BROKER_URI'"|' build/sdkconfig
-          grep MQTT_BROKER_URI build/sdkconfig
+          grep SMART_COOKING_MQTT_BROKER_URI sdkconfig
 
       - name: Show firmware size
         run: |
