@@ -3,4 +3,4 @@
 cmake_minimum_required(VERSION 3.22)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(esp32-smart-cooking-firmware VERSION 0.1.0)
+project(esp32-smart-cooking-firmware VERSION 0.2.0)
