@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  # ── 1. Build firmware ──────────────────────────────────────────────────────
+  build:
+    name: idf.py build (ESP32)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build firmware
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py build
+
+      - name: Show firmware size
+        run: |
+          . /opt/esp/idf/export.sh
+          idf.py size
+
+      - name: Upload firmware artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: |
+            build/*.bin
+            build/*.elf
+            build/*.map
+            build/bootloader/*.bin
+            build/partition_table/*.bin
+            build/compile_commands.json
+            sdkconfig
+          if-no-files-found: error
+
+  # ── 2. Unit tests ──────────────────────────────────────────────────────────
+  unit-tests:
+    name: Run unit tests (Linux host)
+    runs-on: ubuntu-latest
+    container: espressif/idf:v6.0
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and run unit tests
+        shell: bash
+        run: |
+          . /opt/esp/idf/export.sh
+          cd test_apps/unity
+
+          idf.py --preview set-target linux
+          idf.py build
+
+          set +e
+          ./build/unity_tests.elf 2>&1 | tee test_results.raw
+          test_exit=${PIPESTATUS[0]}
+          set -e
+
+          python3 - <<PY
+          from pathlib import Path
+          import html
+
+          raw = Path("test_results.raw").read_text(errors="replace")
+          test_exit = int("${test_exit}")
+
+          failures = 1 if test_exit != 0 else 0
+
+          failure_block = ""
+          if failures:
+              failure_block = f"""
+              <failure message="Unity tests failed">
+          {html.escape(raw)}
+              </failure>
+          """
+
+          xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+          <testsuite name="unity-host-tests" tests="1" failures="{failures}" errors="0" skipped="0" time="0">
+            <testcase classname="unity" name="unity_tests" time="0">
+          {failure_block}
+              <system-out>{html.escape(raw)}</system-out>
+            </testcase>
+          </testsuite>
+          """
+
+          Path("test_results.xml").write_text(xml)
+          PY
+
+          exit "${test_exit}"
+
+      - name: Generate HTML test report
+        if: always()
+        run: |
+          cd test_apps/unity
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import html
+
+          raw = Path("test_results.raw").read_text(errors="replace") if Path("test_results.raw").exists() else "No test output found."
+          status = "PASSED" if "FAIL" not in raw else "FAILED"
+
+          report = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>ESP32 Firmware Test Report</title>
+            <style>
+              body {{ font-family: Arial, sans-serif; margin: 40px; background: #f7f7f7; color: #222; }}
+              .card {{ background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-width: 1000px; }}
+              .passed {{ color: #0a7f28; font-weight: bold; }}
+              .failed {{ color: #b00020; font-weight: bold; }}
+              pre {{ background: #111; color: #eee; padding: 16px; border-radius: 8px; overflow-x: auto; }}
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>ESP32 Firmware Test Report</h1>
+              <p><strong>Project:</strong> esp32-smart-cooking-firmware</p>
+              <p><strong>Test target:</strong> Linux host unit tests</p>
+              <p><strong>Status:</strong> <span class="{status.lower()}">{status}</span></p>
+              <h2>Raw Unity Output</h2>
+              <pre>{html.escape(raw)}</pre>
+            </div>
+          </body>
+          </html>
+          """
+
+          Path("test-report.html").write_text(report)
+          PY
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unity-test-report
+          path: |
+            test_apps/unity/test-report.html
+            test_apps/unity/test_results.xml
+            test_apps/unity/test_results.raw
+          if-no-files-found: error
+
+  # ── 3. Publish GitHub Release ──────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: [build, unit-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create releases and upload assets
+
+    steps:
+      - name: Checkout (for release notes context)
+        uses: actions/checkout@v4
+
+      - name: Download firmware artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32-firmware
+          path: release-assets/firmware
+
+      - name: Download unit test reports
+        uses: actions/download-artifact@v4
+        with:
+          name: unity-test-report
+          path: release-assets/test-reports
+
+      - name: Prepare OTA binary
+        # The file the ESP32 fetches by OTA URL must be named predictably.
+        # Expose it at the top level of the release assets.
+        run: |
+          cp release-assets/firmware/esp32-smart-cooking-firmware.bin \
+             esp32-smart-cooking-firmware.bin
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}   # e.g. v1.0.0-rc1 → prerelease
+          generate_release_notes: true
+          files: |
+            esp32-smart-cooking-firmware.bin
+            release-assets/firmware/esp32-smart-cooking-firmware.elf
+            release-assets/firmware/esp32-smart-cooking-firmware.map
+            release-assets/firmware/bootloader/bootloader.bin
+            release-assets/firmware/partition_table/partition-table.bin
+            release-assets/firmware/sdkconfig
+            release-assets/test-reports/test-report.html
+            release-assets/test-reports/test_results.xml
+            release-assets/test-reports/test_results.raw
