@@ -19,9 +19,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build firmware
+        # MQTT_BROKER_URI is injected from GitHub Actions Secrets at build time.
+        # This sets the compile-time default URI baked into the release binary.
+        # At runtime, NVS key "sc_config/mqtt_uri" takes precedence if present.
+        env:
+          MQTT_BROKER_URI: ${{ secrets.MQTT_BROKER_URI }}
         run: |
           . /opt/esp/idf/export.sh
-          idf.py build
+          idf.py \
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" \
+            -DCONFIG_SMART_COOKING_MQTT_BROKER_URI="$MQTT_BROKER_URI" \
+            build
 
       - name: Show firmware size
         run: |

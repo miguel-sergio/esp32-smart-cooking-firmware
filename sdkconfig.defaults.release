@@ -1,0 +1,16 @@
+# Release overrides — applied on top of sdkconfig.defaults for production builds.
+# Usage: idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" build
+
+# Logging: WARN in production — captures errors and anomalies, not routine telemetry
+CONFIG_LOG_DEFAULT_LEVEL_INFO=n
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_DEFAULT_LEVEL=2
+
+# Compiler: strip assert() calls in release — no panics on internal invariants in field
+CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=0
+
+# Stability test: guarantee the stress-test loop is never compiled into a release build
+CONFIG_SMART_COOKING_STABILITY_TEST=n
+
+# Stability test: ensure the stress-test loop is always disabled in release builds
+CONFIG_SMART_COOKING_STABILITY_TEST=n

@@ -9,6 +9,7 @@
 #include <inttypes.h>
 
 #include "esp_ota_ops.h"
+#include "nvs.h"
 
 #include "mbedtls/platform_util.h"
 #include "esp_timer.h"
@@ -42,10 +43,43 @@ static const char *TAG = "comms";
 #define TOPIC_FAULT         "cooking/fault"
 #define TOPIC_CMD           "cooking/cmd"
 #define TOPIC_OTA           "cooking/ota"
+#define TOPIC_CONFIG        "cooking/config"  /* remote device config — broker URI migration */
 
 /* Telemetry publish intervals — FR-08 */
 #define TELEM_INTERVAL_ACTIVE_MS   1000u   /*  1 Hz — PREHEAT / COOKING / DONE / ERROR */
 #define TELEM_INTERVAL_IDLE_MS    10000u   /* 0.1 Hz — IDLE */
+
+/* OTA MQTT verification timeout (FR-10): if a freshly flashed firmware in
+ * PENDING_VERIFY state does not achieve an MQTT connection within this window
+ * the broker URI is likely misconfigured and the firmware rolls back
+ * automatically, restoring the last known-good image. */
+#define OTA_MQTT_VERIFY_TIMEOUT_S   60
+#define OTA_MQTT_VERIFY_TIMEOUT_US  ((int64_t)OTA_MQTT_VERIFY_TIMEOUT_S * 1000000LL)
+
+/* NVS key for the runtime-configurable MQTT broker URI.
+ * Namespace: "sc_config", key: "mqtt_uri".
+ * Written at manufacturing or via a field provisioning tool.
+ * Survives OTA updates.  Takes precedence over the compile-time default.
+ * Max length includes the null terminator.
+ *
+ * Two-phase commit for URI migration (cooking/config):
+ *   "mqtt_uri_cand" — candidate URI written when a config change arrives.
+ *   "mqtt_uri"      — active URI, only promoted from candidate after a
+ *                     successful MQTT connection confirms the new broker
+ *                     is reachable.  If connection fails within the
+ *                     verification window the candidate is deleted and
+ *                     the device restarts using the previous active URI.
+ */
+#define MQTT_URI_NVS_NAMESPACE  "sc_config"
+#define MQTT_URI_NVS_KEY        "mqtt_uri"
+#define MQTT_URI_NVS_CAND_KEY   "mqtt_uri_cand"
+#define MQTT_URI_MAX_LEN        256u
+
+/* Timeout to validate a candidate URI: if MQTT does not connect within
+ * this window after a cooking/config-triggered restart the candidate is
+ * discarded and the device falls back to the previously active URI. */
+#define URI_CAND_VERIFY_TIMEOUT_S   60
+#define URI_CAND_VERIFY_TIMEOUT_US  ((int64_t)URI_CAND_VERIFY_TIMEOUT_S * 1000000LL)
 
 /* ── Module state ───────────────────────────────────────────────────────── */
 
@@ -64,6 +98,23 @@ static bool                s_wifi_ready  = false;
  * so actuators are in a defined safe state before the restart.  If a cycle
  * is active, an ESTOP is posted first to drive control_task to ERROR. */
 static volatile bool       s_restart_pending = false;
+
+/* Set by handle_config_payload when a non-urgent config change (e.g. broker
+ * URI migration) requires a restart.  Unlike s_restart_pending, this never
+ * posts ESTOP — it waits for the active cycle to finish naturally (IDLE/DONE)
+ * or for the operator to issue STOP/ESTOP.  Safe to wait indefinitely. */
+static volatile bool       s_graceful_restart_pending = false;
+
+/* Set to true on the first MQTT_EVENT_CONNECTED.  Used by the OTA rollback
+ * guard to confirm that the new firmware can reach the configured broker. */
+static volatile bool       s_mqtt_connected  = false;
+
+/* Set to true when the device boots using a candidate URI (written by a
+ * cooking/config command but not yet confirmed reachable).  Cleared once
+ * MQTT connects and the candidate is promoted to the active NVS key.
+ * If the deadline expires before connection, the candidate is discarded
+ * and the device restarts using the previous active URI. */
+static bool                s_uri_candidate_pending = false;
 
 /* Pending OTA URL — set when URL arrives during an active cooking cycle.
  * Dispatched to ota_url_q once state reaches IDLE / DONE / ERROR.
@@ -233,7 +284,84 @@ static void handle_cmd_payload(const char *data, int data_len) {
     cJSON_Delete(root);
 }
 
-/* ── MQTT event handler ─────────────────────────────────────────────────── */
+/* ── Config payload parser ──────────────────────────────────────────────── */
+
+/* Handles cooking/config messages for runtime device reconfiguration.
+ *
+ * Supported fields:
+ *   {"mqtt_uri": "mqtts://new-broker:8883"}
+ *
+ * On a valid mqtt_uri: persists to NVS and triggers a safe deferred restart
+ * (via s_restart_pending).  The existing restart-deferral logic posts ESTOP
+ * if a cycle is active, waits for IDLE/DONE/ERROR, then restarts.  After
+ * reboot the device connects using the new URI and validates it via the OTA
+ * rollback guard — if the new broker is unreachable within 60 s the device
+ * rolls back to the previous firmware which still has the old URI in NVS.
+ *
+ * SECURITY: access control is enforced at the broker level (ACL).  The URI
+ * is validated to be non-empty and within the maximum allowed length; no
+ * scheme-level validation is performed here.
+ */
+static void handle_config_payload(const char *data, int data_len) {
+    char buf[MQTT_URI_MAX_LEN + 64u];
+    if (data_len <= 0 || data_len >= (int)sizeof(buf)) {
+        ESP_LOGW(TAG, "CONFIG: payload length %d out of range — discarded", data_len);
+        return;
+    }
+    memcpy(buf, data, (size_t)data_len);
+    buf[data_len] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "CONFIG: JSON parse failed — discarded");
+        return;
+    }
+
+    cJSON *uri_item = cJSON_GetObjectItemCaseSensitive(root, "mqtt_uri");
+    if (!cJSON_IsString(uri_item) || uri_item->valuestring == NULL ||
+        uri_item->valuestring[0] == '\0') {
+        ESP_LOGW(TAG, "CONFIG: missing or empty \"mqtt_uri\" field — discarded");
+        cJSON_Delete(root);
+        return;
+    }
+
+    const char *new_uri = uri_item->valuestring;
+    if (strlen(new_uri) >= MQTT_URI_MAX_LEN) {
+        ESP_LOGW(TAG, "CONFIG: mqtt_uri too long (%zu chars, max %u) — discarded",
+                 strlen(new_uri), MQTT_URI_MAX_LEN - 1u);
+        cJSON_Delete(root);
+        return;
+    }
+
+    /* Persist new URI as a candidate — not yet promoted to active.
+     * The active URI ("mqtt_uri") is only updated after the new broker
+     * is confirmed reachable.  This prevents NVS from being left with
+     * a bad URI if the candidate broker turns out to be unreachable. */
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, MQTT_URI_NVS_CAND_KEY, new_uri);
+        if (err == ESP_OK) {
+            err = nvs_commit(nvs);
+        }
+        nvs_close(nvs);
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "CONFIG: NVS write failed (%s) — URI not updated",
+                 esp_err_to_name(err));
+        cJSON_Delete(root);
+        return;
+    }
+
+    ESP_LOGI(TAG, "CONFIG: mqtt_uri candidate set to \"%s\" — will promote after connection", new_uri);
+
+    /* Graceful restart: wait for the active cycle to finish naturally.
+     * Does NOT post ESTOP — cooking must not be interrupted for a config change. */
+    s_graceful_restart_pending = true;
+
+    cJSON_Delete(root);
+}
 
 static void mqtt_event_handler(void *arg, esp_event_base_t base,
                                 int32_t event_id, void *event_data) {
@@ -241,15 +369,41 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
+        s_mqtt_connected = true;
         ESP_LOGI(TAG, "MQTT connected");
         /* Subscribe to command and OTA topics on every (re)connect — FR-09, FR-10 */
         esp_mqtt_client_subscribe(ev->client, TOPIC_CMD, 1);
         esp_mqtt_client_subscribe(ev->client, TOPIC_OTA, 1);
-        ESP_LOGI(TAG, "MQTT subscribed: " TOPIC_CMD ", " TOPIC_OTA);
+        esp_mqtt_client_subscribe(ev->client, TOPIC_CONFIG, 1);
+        ESP_LOGI(TAG, "MQTT subscribed: " TOPIC_CMD ", " TOPIC_OTA ", " TOPIC_CONFIG);
+
+        /* Candidate URI promotion: if we booted using a candidate URI and
+         * MQTT is now connected, the new broker is confirmed reachable.
+         * Promote the candidate to the active NVS key and delete the
+         * candidate so subsequent boots use the confirmed URI directly. */
+        if (s_uri_candidate_pending) {
+            nvs_handle_t nvs;
+            if (nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+                char cand[MQTT_URI_MAX_LEN];
+                size_t sz = sizeof(cand);
+                if (nvs_get_str(nvs, MQTT_URI_NVS_CAND_KEY, cand, &sz) == ESP_OK) {
+                    if (nvs_set_str(nvs, MQTT_URI_NVS_KEY, cand) == ESP_OK) {
+                        nvs_erase_key(nvs, MQTT_URI_NVS_CAND_KEY);
+                        nvs_commit(nvs);
+                        ESP_LOGI(TAG, "CONFIG: candidate URI promoted to active: %s", cand);
+                    }
+                }
+                nvs_close(nvs);
+            }
+            s_uri_candidate_pending = false;
+        }
 
         /* Boot self-check: Wi-Fi + MQTT connected → mark firmware valid (FR-10, NFR-05).
          * Only acts when running from a freshly flashed OTA partition pending
-         * verification; no-op on normal boot or after already marked valid. */
+         * verification; no-op on normal boot or after already marked valid.
+         * NOTE: on a device with an active NVS URI, a new OTA firmware will
+         * use that URI and connect normally — this guard is only needed for
+         * fresh devices (no NVS URI) where the compiled default is used. */
         {
             const esp_partition_t *running = esp_ota_get_running_partition();
             esp_ota_img_states_t   ota_state;
@@ -286,6 +440,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 s_ota_pending = true;
                 xSemaphoreGive(s_ota_mutex);
                 ESP_LOGI(TAG, "OTA: URL queued — %.*s", copy_len, ev->data);
+            } else if (strncmp(ev->topic, TOPIC_CONFIG,
+                               (size_t)ev->topic_len) == 0) {
+                handle_config_payload(ev->data, ev->data_len);
             }
         }
         break;
@@ -301,9 +458,69 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
 
 /* ── MQTT init ──────────────────────────────────────────────────────────── */
 
+/* ── MQTT broker URI resolution ─────────────────────────────────────────── */
+
+/* Production pattern: NVS always wins over compile-time config.
+ *
+ * Priority (highest first):
+ *   1. NVS key "mqtt_uri" in namespace "sc_config"  — written at manufacturing
+ *      or by a field provisioning tool; survives OTA.
+ *   2. CONFIG_SMART_COOKING_MQTT_BROKER_URI          — baked in at build time
+ *      by CI/CD from the MQTT_BROKER_URI GitHub secret.
+ *
+ * This guarantees that a device in the field keeps its known-good broker URI
+ * across all future OTA updates regardless of what the new binary compiles in.
+ */
+/* Production pattern: NVS always wins over compile-time config.
+ *
+ * Priority (highest first):
+ *   1. NVS candidate key "mqtt_uri_cand" — written when a cooking/config
+ *      URI change arrives; not yet confirmed reachable.  Used on the
+ *      first boot after the change; discarded if connection fails.
+ *   2. NVS active key "mqtt_uri"         — written at manufacturing or
+ *      promoted from a successfully validated candidate; survives OTA.
+ *   3. CONFIG_SMART_COOKING_MQTT_BROKER_URI — baked in at build time
+ *      by CI/CD from the MQTT_BROKER_URI GitHub secret.  Used when
+ *      neither NVS key is present (fresh device or NVS erased).
+ *
+ * Returns true if the loaded URI came from the candidate key (needs
+ * validation); false otherwise.
+ */
+static bool load_mqtt_uri(char *buf, size_t buf_len) {
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READONLY, &nvs);
+    if (err == ESP_OK) {
+        /* Check candidate first */
+        size_t sz = buf_len;
+        esp_err_t cand_err = nvs_get_str(nvs, MQTT_URI_NVS_CAND_KEY, buf, &sz);
+        if (cand_err == ESP_OK && buf[0] != '\0') {
+            nvs_close(nvs);
+            ESP_LOGI(TAG, "MQTT URI from NVS candidate (pending validation): %s", buf);
+            return true;   /* candidate — must validate */
+        }
+        /* Fall through to active key */
+        sz = buf_len;
+        err = nvs_get_str(nvs, MQTT_URI_NVS_KEY, buf, &sz);
+        nvs_close(nvs);
+        if (err == ESP_OK && buf[0] != '\0') {
+            ESP_LOGI(TAG, "MQTT URI from NVS (active): %s", buf);
+            return false;
+        }
+    }
+    /* No NVS URI — fall back to compile-time default */
+    strlcpy(buf, CONFIG_SMART_COOKING_MQTT_BROKER_URI, buf_len);
+    ESP_LOGI(TAG, "MQTT URI from config: %s", buf);
+    return false;
+}
+
+/* ── MQTT init ──────────────────────────────────────────────────────────── */
+
 static esp_mqtt_client_handle_t mqtt_init(void) {
+    char uri[MQTT_URI_MAX_LEN];
+    s_uri_candidate_pending = load_mqtt_uri(uri, sizeof(uri));
+
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = CONFIG_SMART_COOKING_MQTT_BROKER_URI,
+        .broker.address.uri = uri,
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
@@ -331,6 +548,32 @@ static void comms_task(void *arg) {
 
     esp_mqtt_client_handle_t mqtt_client = mqtt_init();
 
+    /* OTA rollback guard: only relevant on fresh devices (no NVS URI) where
+     * the compiled default URI is used.  On devices with an active NVS URI
+     * the new firmware uses that URI and connects normally — no rollback
+     * needed.  Set a deadline to detect a bad compiled URI at first flash. */
+    int64_t rollback_deadline_us = 0;
+    {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t   ota_state;
+        if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+            ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+            rollback_deadline_us = esp_timer_get_time() + OTA_MQTT_VERIFY_TIMEOUT_US;
+            ESP_LOGI(TAG, "OTA: PENDING_VERIFY — MQTT must connect within %d s or rollback",
+                     OTA_MQTT_VERIFY_TIMEOUT_S);
+        }
+    }
+
+    /* Candidate URI validation deadline: if this boot is using a candidate
+     * URI and MQTT does not connect in time, discard the candidate and
+     * restart — the device will use the previous active URI on next boot. */
+    int64_t uri_cand_deadline_us = 0;
+    if (s_uri_candidate_pending) {
+        uri_cand_deadline_us = esp_timer_get_time() + URI_CAND_VERIFY_TIMEOUT_US;
+        ESP_LOGI(TAG, "CONFIG: candidate URI — must connect within %d s or discard",
+                 URI_CAND_VERIFY_TIMEOUT_S);
+    }
+
     /* ── Loop — telemetry, fault alerts, command dispatch ──────────────── */
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
@@ -346,6 +589,34 @@ static void comms_task(void *arg) {
 
     for (;;) {
         ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+        /* OTA rollback guard (fresh device / no NVS URI): trigger automatic
+         * rollback if MQTT did not connect within the deadline. */
+        if (rollback_deadline_us != 0 && !s_mqtt_connected &&
+            esp_timer_get_time() >= rollback_deadline_us) {
+            ESP_LOGE(TAG, "OTA: MQTT did not connect within %d s — rolling back to previous image",
+                     OTA_MQTT_VERIFY_TIMEOUT_S);
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+            /* not reached */
+        }
+
+        /* Candidate URI validation: if MQTT did not connect within the
+         * deadline the candidate broker is unreachable.  Discard the
+         * candidate NVS key and restart — the device will use the
+         * previous active URI (or compiled default) on next boot. */
+        if (uri_cand_deadline_us != 0 && !s_mqtt_connected &&
+            esp_timer_get_time() >= uri_cand_deadline_us) {
+            ESP_LOGE(TAG, "CONFIG: candidate URI unreachable after %d s — discarding, reverting",
+                     URI_CAND_VERIFY_TIMEOUT_S);
+            nvs_handle_t nvs;
+            if (nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &nvs) == ESP_OK) {
+                nvs_erase_key(nvs, MQTT_URI_NVS_CAND_KEY);
+                nvs_commit(nvs);
+                nvs_close(nvs);
+            }
+            esp_restart();
+            /* not reached */
+        }
 
         /* Block for up to 100 ms waiting for the first item, then drain the
          * rest of the queue non-blocking.  This guarantees the loop runs at
@@ -382,6 +653,21 @@ static void comms_task(void *arg) {
             mqtt_cmd_t estop = { .type = CMD_ESTOP, .profile_id = 0u };
             xQueueSend(s_cfg.cmd_q, &estop, 0);
             ESP_LOGW(TAG, "Wi-Fi restart: cycle active (%s) — ESTOP posted, waiting",
+                     state_name(cs));
+        }
+
+        /* ── Graceful restart: broker URI config change ──────────────────── */
+        /* Never posts ESTOP — waits for the cycle to reach IDLE/DONE/ERROR   */
+        /* naturally (operator issues STOP, cycle timer expires, or a fault). */
+        if (s_graceful_restart_pending) {
+            cooking_state_t cs = last_state.state;
+            if (cooking_logic_cycle_inactive(cs)) {
+                ESP_LOGI(TAG, "Config restart: state=%s — restarting now",
+                         state_name(cs));
+                esp_restart();
+                /* not reached */
+            }
+            ESP_LOGD(TAG, "Config restart: waiting for cycle to finish (%s)",
                      state_name(cs));
         }
 

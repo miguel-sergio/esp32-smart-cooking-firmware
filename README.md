@@ -166,7 +166,7 @@ Custom partition table for 4 MB flash. Two OTA slots of 1.5 MB each are required
 
 | Name | Type | Offset | Size | Notes |
 |------|------|--------|------|-------|
-| `nvs` | data | 0x9000 | 24 KB | Wi-Fi credentials, cooking profiles |
+| `nvs` | data | 0x9000 | 24 KB | Wi-Fi credentials, cooking profiles, MQTT URI |
 | `otadata` | data | 0xF000 | 8 KB | Active OTA slot selector |
 | `phy_init` | data | 0x11000 | 4 KB | RF calibration data |
 | `ota_0` | app | 0x20000 | 1.5 MB | OTA slot 0 |
@@ -193,6 +193,74 @@ Interruptive operations (OTA update, Wi-Fi max-retry recovery) are never execute
 
 ### Typed queues as the sole inter-task interface
 Each task owns its own state exclusively. All data flow between tasks is explicit, unidirectional, and typed — there is no shared global state. This makes data flow auditable at a glance, eliminates a category of race conditions, and means each task can be reasoned about in isolation. The tradeoff is a small amount of boilerplate in queue definitions and config structs.
+
+### MQTT broker URI stored in NVS, not compiled in
+The address of the cloud broker is stored on-device in NVS (flash), independently of the firmware binary. At first flash, the device uses the address compiled into the release build by the CI pipeline (injected as a secret, never in source code). Once provisioned in the field, the NVS value takes priority on every subsequent boot — meaning OTA firmware updates never overwrite the production broker address. The tradeoff is a one-time factory setup step to write the NVS key before the device ships.
+
+### Two-phase commit for remote broker migration
+When a new broker address is pushed remotely via the `cooking/config` topic, the device does not switch immediately. It writes the new address as a *candidate* to a separate NVS key and restarts. If the device successfully connects to the new broker within 60 seconds, the candidate is promoted to the active address. If the connection fails (unreachable broker, wrong port, typo), the candidate is discarded and the device restarts using the previous working address — no manual recovery or physical access needed. This guarantees that a misconfigured broker command cannot permanently disconnect a deployed device.
+
+---
+
+## Deployment
+
+### First-time factory setup
+
+Every device goes through a one-time setup before it ships:
+
+1. **Erase flash** — ensures a clean state with no stale credentials or configuration from previous development builds.
+2. **Flash firmware** — the release binary built by the CI pipeline, which includes the production broker address compiled in as a fallback.
+3. **Wi-Fi provisioning** — on first boot the device advertises over Bluetooth as `SmartCooking`. The operator uses the ESP Blufi app (iOS/Android) to send the production Wi-Fi SSID and password. Credentials are saved to flash and the device restarts.
+4. **Set production broker URI** — the broker address is written directly to the device's flash storage over USB, so all subsequent boots (including after OTA updates) use this address and ignore the compiled fallback.
+
+After these four steps the device is ready to ship. No further physical access is required.
+
+### Remote broker migration (post-deployment)
+
+If the cloud broker address changes after devices are in the field, it can be updated remotely without a firmware update or physical access. Publish the new address to the `cooking/config` topic:
+
+```json
+{"mqtt_uri": "mqtt://new-broker.example.com:1883"}
+```
+
+The device validates the new address before committing: it restarts using the candidate address and only saves it permanently once the connection succeeds. If the new address is unreachable, the device automatically reverts to the previous working address. No device is ever left permanently disconnected by a bad config command.
+
+```mermaid
+flowchart TD
+    A(["Device running normal operation"]) --> B["Operator publishes new broker URI to cooking/config"]
+    B --> C["Device saves URI as <i>candidate</i> —<br/>active URI unchanged"]
+    C --> D["Device waits for current cycle to finish"]
+    D --> E(["Device restarts using candidate URI"])
+
+    E --> F{"Connects to new broker<br/>within 60 s?"}
+
+    F -->|Yes| G["Candidate promoted to<br/>active URI in flash storage"]
+    F -->|No| H["Candidate discarded<br/>from flash storage"]
+
+    G --> I(["Device running new broker ✓"])
+    H --> J(["Device restarts using previous broker ✓"])
+
+    style G fill:#e9f7ef,stroke:#58b07c,color:#2d2d2d
+    style I fill:#e9f7ef,stroke:#58b07c,color:#2d2d2d
+    style H fill:#fdf0e6,stroke:#d4845a,color:#2d2d2d
+    style J fill:#fdf0e6,stroke:#d4845a,color:#2d2d2d
+```
+
+### OTA firmware updates
+
+New firmware is delivered remotely by publishing a download URL to the `cooking/ota` topic. The update is deferred until the current cooking cycle finishes (the appliance is never interrupted mid-cook), then downloaded over HTTPS, verified, and applied. If the new firmware fails to connect to the broker, the bootloader automatically rolls back to the previous version.
+
+### Production vs development builds
+
+Release builds apply a stricter configuration on top of the development defaults:
+
+| Setting | Development | Production |
+|---------|-------------|------------|
+| Log level | INFO — full trace of all events | WARN — only anomalies and errors |
+| Assertions | Enabled — panic on violated invariants | Disabled — no unexpected resets in field |
+| Stability test | Configurable | Always off |
+
+The CI pipeline always produces a production build when a release tag is pushed.
 
 ---
 
@@ -350,3 +418,4 @@ Pushing/creating a `v*` tag (e.g. `git tag v1.0.0 && git push origin v1.0.0`) tr
 
 - **PID thermal control** — Replace the current bang-bang relay controller with a PID loop for tighter temperature regulation and elimination of overshoot, particularly relevant for the Delicate profile.
 - **Touch display (LVGL)** — Local UI on a capacitive touch screen using LVGL, allowing full appliance control and live telemetry without MQTT. Targets SPI-connected panels (e.g. ILI9341).
+- **Offline / standalone operation** — All cooking logic already runs locally on the device; MQTT is only needed for remote control and telemetry. A future input layer — either a capacitive touch display (LVGL) or a rotary encoder with a small OLED — would allow the end user to start, stop, and configure cooking cycles directly on the appliance, with no Wi-Fi or internet connection required. This makes the device fully functional as a standalone appliance and resilient to network outages.
