@@ -20,15 +20,16 @@ jobs:
 
       - name: Build firmware
         # MQTT_BROKER_URI is injected from GitHub Actions Secrets at build time.
-        # This sets the compile-time default URI baked into the release binary.
+        # Written to a temporary sdkconfig.defaults.ci overlay so ESP-IDF picks
+        # it up reliably (cmake -DCONFIG_* does not override sdkconfig values).
         # At runtime, NVS key "sc_config/mqtt_uri" takes precedence if present.
         env:
           MQTT_BROKER_URI: ${{ secrets.MQTT_BROKER_URI }}
         run: |
           . /opt/esp/idf/export.sh
+          echo "CONFIG_SMART_COOKING_MQTT_BROKER_URI=\"${MQTT_BROKER_URI}\"" > sdkconfig.defaults.ci
           idf.py \
-            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release" \
-            -DCONFIG_SMART_COOKING_MQTT_BROKER_URI="$MQTT_BROKER_URI" \
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.release;sdkconfig.defaults.ci" \
             build
 
       - name: Show firmware size
