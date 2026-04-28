@@ -145,5 +145,9 @@ void app_main(void) {
     cli_task_start(&cli_cfg);
 #endif
 
-    ESP_LOGI(TAG, "Firmware started — control_task + thermal_task + motor_task + comms_task running");
+    ESP_LOGI(TAG, "Firmware started — control_task + thermal_task + motor_task"
+                  " + comms_task + ota_task running");
+#if CONFIG_SMART_COOKING_CLI
+    ESP_LOGI(TAG, "cli_task also running (CONFIG_SMART_COOKING_CLI=y)");
+#endif
 }

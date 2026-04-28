@@ -31,13 +31,14 @@ bool cooking_logic_check_heater_fail(float     last_temp,
                                      uint32_t *below_target_since_ms,
                                      uint32_t  heat_rise_ms);
 
-/* ── OTA / safe-state dispatch decision ────────────────────────────────── */
+/* ── Safe-state / interruptibility check ────────────────────────────────────── */
 
 /**
- * Returns true when @p state allows an interruptive operation (OTA update,
- * deferred Wi-Fi restart, etc.) — i.e., no active cooking cycle.
+ * Returns true when @p state indicates no active cooking cycle is running,
+ * i.e., it is safe to perform interruptive operations such as an OTA update
+ * or a deferred Wi-Fi restart (IDLE, DONE, or ERROR).
  */
-bool cooking_logic_ota_should_dispatch(cooking_state_t state);
+bool cooking_logic_cycle_inactive(cooking_state_t state);
 
 /* ── State transition ───────────────────────────────────────────────────── */
 

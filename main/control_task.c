@@ -13,9 +13,6 @@
 
 static const char *TAG = "ctrl";
 
-/* ── Generic helpers ───────────────────────────────────────────────────── */
-#define ARRAY_SIZE(a)  (sizeof(a) / sizeof((a)[0]))
-
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
 #define CTRL_STACK_WORDS    (4096u / sizeof(StackType_t))
@@ -78,28 +75,6 @@ static control_task_config_t s_cfg;
 
 static inline uint32_t now_ms(void) {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
-
-static const char *state_name(cooking_state_t s) {
-    switch (s) {
-    case COOKING_STATE_IDLE:    return "IDLE";
-    case COOKING_STATE_PREHEAT: return "PREHEAT";
-    case COOKING_STATE_COOKING: return "COOKING";
-    case COOKING_STATE_DONE:    return "DONE";
-    case COOKING_STATE_ERROR:   return "ERROR";
-    default:                    return "UNKNOWN";
-    }
-}
-
-static const char *fault_name(fault_type_t f) {
-    switch (f) {
-    case FAULT_NONE:           return "NONE";
-    case FAULT_OVERTEMP:       return "OVERTEMP";
-    case FAULT_SENSOR_TIMEOUT: return "SENSOR_TIMEOUT";
-    case FAULT_ESTOP:          return "ESTOP";
-    case FAULT_HEATER_FAIL:    return "HEATER_FAIL";
-    default:                   return "UNKNOWN";
-    }
 }
 
 static const char *cmd_name(mqtt_cmd_type_t t) {
@@ -183,7 +158,7 @@ static void control_task(void *arg) {
     uint32_t cook_start_ms        = 0;
     uint32_t done_start_ms        = 0;
     uint32_t last_temp_ms         = 0;
-    uint32_t below_target_since_ms = 0;   /* start of current below-target window, 0 = at target */
+    uint32_t below_target_since_ms = 0;   /* start of current below-target window, 0 = no active window */
     float    last_temp            = 0.0f;
     float    last_humidity        = 0.0f;
     int8_t   last_motor_duty      = 0;

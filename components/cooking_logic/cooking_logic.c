@@ -21,9 +21,9 @@ bool cooking_logic_check_heater_fail(float     last_temp,
     return false;
 }
 
-/* ── OTA / safe-state dispatch ──────────────────────────────────────────── */
+/* ── Safe-state / interruptibility check ────────────────────────────────────── */
 
-bool cooking_logic_ota_should_dispatch(cooking_state_t state) {
+bool cooking_logic_cycle_inactive(cooking_state_t state) {
     return state == COOKING_STATE_IDLE  ||
            state == COOKING_STATE_DONE  ||
            state == COOKING_STATE_ERROR;

@@ -68,3 +68,32 @@ typedef struct {
     uint8_t         active_profile; /* 0 = Standard, 1 = Delicate            */
     int8_t          motor_duty_pct; /* 0 = stopped, >0 = running             */
 } system_state_t;
+
+/* ── Shared helpers ─────────────────────────────────────────────────────── */
+
+/** Convenience macro — number of elements in a stack-allocated array. */
+#define ARRAY_SIZE(a)  (sizeof(a) / sizeof((a)[0]))
+
+/** Human-readable name for a cooking_state_t value (for logs/telemetry). */
+static inline const char *state_name(cooking_state_t s) {
+    switch (s) {
+    case COOKING_STATE_IDLE:    return "IDLE";
+    case COOKING_STATE_PREHEAT: return "PREHEAT";
+    case COOKING_STATE_COOKING: return "COOKING";
+    case COOKING_STATE_DONE:    return "DONE";
+    case COOKING_STATE_ERROR:   return "ERROR";
+    default:                    return "UNKNOWN";
+    }
+}
+
+/** Human-readable name for a fault_type_t value (for logs/telemetry). */
+static inline const char *fault_name(fault_type_t f) {
+    switch (f) {
+    case FAULT_NONE:           return "NONE";
+    case FAULT_OVERTEMP:       return "OVERTEMP";
+    case FAULT_SENSOR_TIMEOUT: return "SENSOR_TIMEOUT";
+    case FAULT_ESTOP:          return "ESTOP";
+    case FAULT_HEATER_FAIL:    return "HEATER_FAIL";
+    default:                   return "UNKNOWN";
+    }
+}

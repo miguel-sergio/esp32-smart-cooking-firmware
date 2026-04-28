@@ -316,47 +316,20 @@ static esp_mqtt_client_handle_t mqtt_init(void) {
     return client;
 }
 
-/* ── State name helpers ─────────────────────────────────────────────────── */
-
-static const char *state_name(cooking_state_t s) {
-    switch (s) {
-    case COOKING_STATE_IDLE:    return "IDLE";
-    case COOKING_STATE_PREHEAT: return "PREHEAT";
-    case COOKING_STATE_COOKING: return "COOKING";
-    case COOKING_STATE_DONE:    return "DONE";
-    case COOKING_STATE_ERROR:   return "ERROR";
-    default:                    return "UNKNOWN";
-    }
-}
-
-static const char *fault_name(fault_type_t f) {
-    switch (f) {
-    case FAULT_NONE:           return "NONE";
-    case FAULT_OVERTEMP:       return "OVERTEMP";
-    case FAULT_SENSOR_TIMEOUT: return "SENSOR_TIMEOUT";
-    case FAULT_ESTOP:          return "ESTOP";
-    case FAULT_HEATER_FAIL:    return "HEATER_FAIL";
-    default:                   return "UNKNOWN";
-    }
-}
-
 /* ── Task ───────────────────────────────────────────────────────────────── */
 
 static void comms_task(void *arg) {
     (void)arg;
 
     /* ── Wi-Fi + MQTT init (inside task, before loop) ───────────────────── */
-    bool wifi_ok = wifi_init();
-    if (wifi_ok) {
-        /* Mark runtime phase: from here, exhausted retries trigger esp_restart()
-         * instead of signalling WIFI_FAIL_BIT (see wifi_event_handler). */
-        s_wifi_ready = true;
-    }
+    /* wifi_init() never returns false — all failure paths call
+     * provisioning_on_wifi_failure() which calls esp_restart(). */
+    wifi_init();
+    /* Mark runtime phase: from here, exhausted retries trigger esp_restart()
+     * instead of signalling WIFI_FAIL_BIT (see wifi_event_handler). */
+    s_wifi_ready = true;
 
-    esp_mqtt_client_handle_t mqtt_client = NULL;
-    if (wifi_ok) {
-        mqtt_client = mqtt_init();
-    }
+    esp_mqtt_client_handle_t mqtt_client = mqtt_init();
 
     /* ── Loop — telemetry, fault alerts, command dispatch ──────────────── */
     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
@@ -396,7 +369,7 @@ static void comms_task(void *arg) {
         /* Restart only when actuators are in a defined safe state.          */
         if (s_restart_pending) {
             cooking_state_t cs = last_state.state;
-            if (cooking_logic_ota_should_dispatch(cs)) {
+            if (cooking_logic_cycle_inactive(cs)) {
                 ESP_LOGI(TAG, "Wi-Fi restart: state=%s — restarting now",
                          state_name(cs));
                 esp_restart();
@@ -426,7 +399,7 @@ static void comms_task(void *arg) {
 
             if (pending) {
                 cooking_state_t cs = last_state.state;
-                if (cooking_logic_ota_should_dispatch(cs)) {
+                if (cooking_logic_cycle_inactive(cs)) {
                     configASSERT(s_cfg.ota_url_q != NULL);
                     BaseType_t send_ok = xQueueSend(s_cfg.ota_url_q, url_copy, 0);
                     if (send_ok == pdTRUE) {
