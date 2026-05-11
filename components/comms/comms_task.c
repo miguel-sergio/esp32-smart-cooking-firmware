@@ -38,7 +38,10 @@ extern const uint8_t client_key_pem_end[]      asm("_binary_esp32_smart_cooking_
 
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
-#define COMMS_STACK_WORDS   (6144u / sizeof(StackType_t))
+/* 8 KB stack — accommodates the 2 KB url_copy local, Wi-Fi/MQTT init call
+ * frames, and general comms_task processing.  Increased from 6 KB to avoid
+ * stack overflow after OTA_URL_MAX_LEN was raised to 2048. */
+#define COMMS_STACK_WORDS   (8192u / sizeof(StackType_t))
 #define COMMS_PRIORITY      3
 #define COMMS_CORE          0
 
@@ -88,6 +91,18 @@ extern const uint8_t client_key_pem_end[]      asm("_binary_esp32_smart_cooking_
  * Written before OTA restart; read on boot to report SUCCEEDED to AWS. */
 #define JOB_ID_NVS_KEY          "pending_job_id"
 #define JOB_ID_MAX_LEN          128u
+
+/* Maximum byte length of a Jobs notify-next payload we will parse.
+ * Sized to fit the largest well-formed document: OTA_URL_MAX_LEN for the
+ * firmware URL, plus headroom for jobId and surrounding JSON keys. */
+#define JOBS_PAYLOAD_MAX_LEN    (OTA_URL_MAX_LEN + 256u)
+
+/* Maximum length of a formatted Jobs update topic.
+ * JOBS_UPDATE_FMT has two characters for "%s"; subtracting sizeof("%s")
+ * removes both the placeholder and its null terminator, then adding
+ * JOB_ID_MAX_LEN (which includes the null terminator) gives the exact
+ * buffer size needed for snprintf. */
+#define JOBS_UPDATE_TOPIC_LEN   ((sizeof(JOBS_UPDATE_FMT) - sizeof("%s")) + JOB_ID_MAX_LEN)
 
 /* Timeout to validate a candidate URI: if MQTT does not connect within
  * this window after a cooking/config-triggered restart the candidate is
@@ -425,7 +440,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 char job_id_buf[JOB_ID_MAX_LEN];
                 size_t sz = sizeof(job_id_buf);
                 if (nvs_get_str(job_nvs, JOB_ID_NVS_KEY, job_id_buf, &sz) == ESP_OK) {
-                    char update_topic[192];
+                    char update_topic[JOBS_UPDATE_TOPIC_LEN];
                     snprintf(update_topic, sizeof(update_topic), JOBS_UPDATE_FMT, job_id_buf);
                     const char *succeeded = "{\"status\":\"SUCCEEDED\"}";
                     esp_mqtt_client_publish(ev->client, update_topic, succeeded, 0, 1, 0);
@@ -494,47 +509,74 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                 handle_config_payload(ev->data, ev->data_len);
             } else if (strncmp(ev->topic, JOBS_NOTIFY_NEXT,
                                (size_t)ev->topic_len) == 0) {
-                /* IoT Job received: extract jobId and firmware URL, queue OTA */
-                char buf[512];
-                int len = ev->data_len < (int)(sizeof(buf) - 1) ? ev->data_len : (int)(sizeof(buf) - 1);
-                memcpy(buf, ev->data, (size_t)len);
-                buf[len] = '\0';
+                /* IoT Job received: extract jobId and firmware URL, queue OTA. */
+                if (ev->data_len <= 0 || ev->data_len >= (int)JOBS_PAYLOAD_MAX_LEN) {
+                    ESP_LOGW(TAG, "Jobs: payload length %d out of range (max %u) — discarded",
+                             ev->data_len, JOBS_PAYLOAD_MAX_LEN - 1u);
+                    break;
+                }
+                char buf[JOBS_PAYLOAD_MAX_LEN];
+                memcpy(buf, ev->data, (size_t)ev->data_len);
+                buf[ev->data_len] = '\0';
 
                 cJSON *root = cJSON_Parse(buf);
-                if (root) {
-                    cJSON *execution  = cJSON_GetObjectItemCaseSensitive(root, "execution");
-                    cJSON *job_id     = execution ? cJSON_GetObjectItemCaseSensitive(execution, "jobId") : NULL;
-                    cJSON *job_doc    = execution ? cJSON_GetObjectItemCaseSensitive(execution, "jobDocument") : NULL;
-                    cJSON *url        = job_doc   ? cJSON_GetObjectItemCaseSensitive(job_doc, "url") : NULL;
 
-                    if (cJSON_IsString(job_id) && cJSON_IsString(url)) {
-                        /* Report IN_PROGRESS */
-                        char update_topic[128];
-                        snprintf(update_topic, sizeof(update_topic), JOBS_UPDATE_FMT, job_id->valuestring);
-                        const char *in_progress = "{\"status\":\"IN_PROGRESS\"}";
-                        esp_mqtt_client_publish(ev->client, update_topic, in_progress, 0, 1, 0);
-
-                        /* Persist jobId in NVS so we can report SUCCEEDED after reboot */
-                        nvs_handle_t job_nvs;
-                        if (nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &job_nvs) == ESP_OK) {
-                            nvs_set_str(job_nvs, JOB_ID_NVS_KEY, job_id->valuestring);
-                            nvs_commit(job_nvs);
-                            nvs_close(job_nvs);
-                            ESP_LOGI(TAG, "Job %s: jobId persisted to NVS", job_id->valuestring);
-                        }
-
-                        /* Queue OTA URL */
-                        int copy_len = (int)strlen(url->valuestring);
-                        copy_len = copy_len < (int)(OTA_URL_MAX_LEN - 1u) ? copy_len : (int)(OTA_URL_MAX_LEN - 1u);
-                        xSemaphoreTake(s_ota_mutex, portMAX_DELAY);
-                        memcpy(s_pending_ota_url, url->valuestring, (size_t)copy_len);
-                        s_pending_ota_url[copy_len] = '\0';
-                        s_ota_pending = true;
-                        xSemaphoreGive(s_ota_mutex);
-                        ESP_LOGI(TAG, "Job %s: OTA URL queued — %s", job_id->valuestring, url->valuestring);
-                    }
-                    cJSON_Delete(root);
+                if (root == NULL) {
+                    ESP_LOGW(TAG, "Jobs: JSON parse failed — discarded");
+                    break;
                 }
+
+                cJSON *execution  = cJSON_GetObjectItemCaseSensitive(root, "execution");
+                cJSON *job_id     = execution ? cJSON_GetObjectItemCaseSensitive(execution, "jobId") : NULL;
+                cJSON *job_doc    = execution ? cJSON_GetObjectItemCaseSensitive(execution, "jobDocument") : NULL;
+                cJSON *url        = job_doc   ? cJSON_GetObjectItemCaseSensitive(job_doc, "url") : NULL;
+
+                if (job_id == NULL || url == NULL ||
+                    !cJSON_IsString(job_id) || !cJSON_IsString(url) ||
+                    job_id->valuestring == NULL || url->valuestring == NULL) {
+                    ESP_LOGW(TAG, "Jobs: missing jobId or url fields — discarded");
+                    cJSON_Delete(root);
+                    break;
+                }
+
+                const char *job_id_str = job_id->valuestring;
+                const char *url_str    = url->valuestring;
+
+                /* Enforce jobId length before use — prevents topic truncation
+                 * and NVS corruption (nvs_get_str reads into JOB_ID_MAX_LEN). */
+                if (strlen(job_id_str) >= JOB_ID_MAX_LEN) {
+                    ESP_LOGW(TAG, "Jobs: jobId too long (%zu chars, max %u) — discarded",
+                             strlen(job_id_str), JOB_ID_MAX_LEN - 1u);
+                    cJSON_Delete(root);
+                    break;
+                }
+
+                /* Report IN_PROGRESS */
+                char update_topic[JOBS_UPDATE_TOPIC_LEN];
+                snprintf(update_topic, sizeof(update_topic), JOBS_UPDATE_FMT, job_id_str);
+                const char *in_progress = "{\"status\":\"IN_PROGRESS\"}";
+                esp_mqtt_client_publish(ev->client, update_topic, in_progress, 0, 1, 0);
+
+                /* Persist jobId in NVS so we can report SUCCEEDED after reboot */
+                nvs_handle_t job_nvs;
+                if (nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &job_nvs) == ESP_OK) {
+                    nvs_set_str(job_nvs, JOB_ID_NVS_KEY, job_id_str);
+                    nvs_commit(job_nvs);
+                    nvs_close(job_nvs);
+                    ESP_LOGI(TAG, "Job %s: jobId persisted to NVS", job_id_str);
+                }
+
+                /* Queue OTA URL */
+                int copy_len = (int)strlen(url_str);
+                copy_len = copy_len < (int)(OTA_URL_MAX_LEN - 1u) ? copy_len : (int)(OTA_URL_MAX_LEN - 1u);
+                xSemaphoreTake(s_ota_mutex, portMAX_DELAY);
+                memcpy(s_pending_ota_url, url_str, (size_t)copy_len);
+                s_pending_ota_url[copy_len] = '\0';
+                s_ota_pending = true;
+                xSemaphoreGive(s_ota_mutex);
+                ESP_LOGI(TAG, "Job %s: OTA URL queued — %s", job_id_str, url_str);
+
+                cJSON_Delete(root);
             } else if (strncmp(ev->topic, SHADOW_DELTA,
                                (size_t)ev->topic_len) == 0) {
                 /* Shadow delta: AWS detected a difference between desired and
@@ -549,13 +591,21 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
                     cJSON *profile = state
                         ? cJSON_GetObjectItemCaseSensitive(state, "active_profile")
                         : NULL;
-                    if (cJSON_IsNumber(profile)) {
-                        mqtt_cmd_t cmd = {
-                            .type       = CMD_START,
-                            .profile_id = (uint8_t)(int)profile->valuedouble,
-                        };
-                        xQueueSend(s_cfg.cmd_q, &cmd, 0);
-                        ESP_LOGI(TAG, "Shadow delta: active_profile → %d", (int)profile->valuedouble);
+                    if (cJSON_IsNumber(profile) && profile != NULL) {
+                        int v = (int)profile->valuedouble;
+                        if (v < 0 || v > 255) {
+                            ESP_LOGW(TAG, "Shadow delta: active_profile %d out of range [0..255] — discarded", v);
+                        } else {
+                            mqtt_cmd_t cmd = {
+                                .type       = CMD_START,
+                                .profile_id = (uint8_t)v,
+                            };
+                            if (xQueueSend(s_cfg.cmd_q, &cmd, 0) != pdTRUE) {
+                                ESP_LOGW(TAG, "Shadow delta: cmd_q full — command dropped");
+                            } else {
+                                ESP_LOGI(TAG, "Shadow delta: active_profile → %d", v);
+                            }
+                        }
                     }
                     cJSON_Delete(root);
                 }
