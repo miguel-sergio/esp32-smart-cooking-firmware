@@ -4,7 +4,7 @@
 #include "freertos/queue.h"
 
 /* Maximum URL length accepted via cooking/ota (includes null terminator). */
-#define OTA_URL_MAX_LEN  512u
+#define OTA_URL_MAX_LEN  2048u
 
 /* ── ota_task configuration ─────────────────────────────────────────────── */
 

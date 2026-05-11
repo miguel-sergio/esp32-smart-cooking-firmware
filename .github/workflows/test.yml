@@ -22,6 +22,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Write AWS IoT certificates
+        env:
+          AWS_IOT_CERT: ${{ secrets.AWS_IOT_CERT }}
+          AWS_IOT_KEY:  ${{ secrets.AWS_IOT_KEY }}
+          AWS_IOT_CA:   ${{ secrets.AWS_IOT_CA }}
+        run: |
+          mkdir -p main/certs
+          printf '%s' "${AWS_IOT_CERT}" > main/certs/esp32-smart-cooking.cert.pem
+          printf '%s' "${AWS_IOT_KEY}"  > main/certs/esp32-smart-cooking.private.key
+          printf '%s' "${AWS_IOT_CA}"   > main/certs/AmazonRootCA1.pem
+
       - name: Build driver test app
         run: |
           . /opt/esp/idf/export.sh

@@ -73,6 +73,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# AWS IoT Core device certificates
+main/certs/
+
 # VS Code machine-specific settings (contain local paths)
 .vscode/settings.json
 
