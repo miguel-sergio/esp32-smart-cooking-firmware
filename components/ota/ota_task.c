@@ -14,8 +14,11 @@ static const char *TAG = "ota";
 
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
-/* 8 KB stack — esp_https_ota needs TLS buffers (~6 KB) */
-#define OTA_STACK_WORDS   (8192u / sizeof(StackType_t))
+/* 12 KB stack — esp_https_ota needs TLS buffers (~6 KB), the OTA URL local
+ * variable consumes 2 KB (OTA_URL_MAX_LEN), and additional margin covers
+ * HTTP client internals and call-frame overhead.  Increased from 8 KB to
+ * avoid stack overflow after OTA_URL_MAX_LEN was raised to 2048. */
+#define OTA_STACK_WORDS   (12288u / sizeof(StackType_t))
 #define OTA_PRIORITY      2
 #define OTA_CORE          0
 

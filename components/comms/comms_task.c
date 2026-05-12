@@ -28,9 +28,20 @@
 
 static const char *TAG = "comms";
 
+/* ── AWS IoT Core certificates (embedded at build time via CMakeLists.txt) ── */
+extern const uint8_t aws_root_ca_pem_start[]   asm("_binary_AmazonRootCA1_pem_start");
+extern const uint8_t aws_root_ca_pem_end[]     asm("_binary_AmazonRootCA1_pem_end");
+extern const uint8_t client_cert_pem_start[]   asm("_binary_esp32_smart_cooking_cert_pem_start");
+extern const uint8_t client_cert_pem_end[]     asm("_binary_esp32_smart_cooking_cert_pem_end");
+extern const uint8_t client_key_pem_start[]    asm("_binary_esp32_smart_cooking_private_key_start");
+extern const uint8_t client_key_pem_end[]      asm("_binary_esp32_smart_cooking_private_key_end");
+
 /* ── Task constants ─────────────────────────────────────────────────────── */
 
-#define COMMS_STACK_WORDS   (6144u / sizeof(StackType_t))
+/* 8 KB stack — accommodates the 2 KB url_copy local, Wi-Fi/MQTT init call
+ * frames, and general comms_task processing.  Increased from 6 KB to avoid
+ * stack overflow after OTA_URL_MAX_LEN was raised to 2048. */
+#define COMMS_STACK_WORDS   (8192u / sizeof(StackType_t))
 #define COMMS_PRIORITY      3
 #define COMMS_CORE          0
 
@@ -44,6 +55,14 @@ static const char *TAG = "comms";
 #define TOPIC_CMD           "cooking/cmd"
 #define TOPIC_OTA           "cooking/ota"
 #define TOPIC_CONFIG        "cooking/config"  /* remote device config — broker URI migration */
+
+/* AWS IoT Device Shadow topics (named shadow: cooking-state) */
+#define SHADOW_UPDATE       "$aws/things/esp32-smart-cooking/shadow/name/cooking-state/update"
+#define SHADOW_DELTA        "$aws/things/esp32-smart-cooking/shadow/name/cooking-state/update/delta"
+
+/* AWS IoT Jobs topics */
+#define JOBS_NOTIFY_NEXT    "$aws/things/esp32-smart-cooking/jobs/notify-next"
+#define JOBS_UPDATE_FMT     "$aws/things/esp32-smart-cooking/jobs/%s/update"
 
 /* Telemetry publish intervals — FR-08 */
 #define TELEM_INTERVAL_ACTIVE_MS   1000u   /*  1 Hz — PREHEAT / COOKING / DONE / ERROR */
@@ -67,6 +86,23 @@ static const char *TAG = "comms";
 #define MQTT_URI_NVS_KEY        "mqtt_uri"
 #define MQTT_URI_NVS_CAND_KEY   "mqtt_uri_cand"
 #define MQTT_URI_MAX_LEN        256u
+
+/* NVS key for persisting the pending IoT Job ID across OTA reboots.
+ * Written before OTA restart; read on boot to report SUCCEEDED to AWS. */
+#define JOB_ID_NVS_KEY          "pending_job_id"
+#define JOB_ID_MAX_LEN          128u
+
+/* Maximum byte length of a Jobs notify-next payload we will parse.
+ * Sized to fit the largest well-formed document: OTA_URL_MAX_LEN for the
+ * firmware URL, plus headroom for jobId and surrounding JSON keys. */
+#define JOBS_PAYLOAD_MAX_LEN    (OTA_URL_MAX_LEN + 256u)
+
+/* Maximum length of a formatted Jobs update topic.
+ * JOBS_UPDATE_FMT has two characters for "%s"; subtracting sizeof("%s")
+ * removes both the placeholder and its null terminator, then adding
+ * JOB_ID_MAX_LEN (which includes the null terminator) gives the exact
+ * buffer size needed for snprintf. */
+#define JOBS_UPDATE_TOPIC_LEN   ((sizeof(JOBS_UPDATE_FMT) - sizeof("%s")) + JOB_ID_MAX_LEN)
 
 /* Timeout to validate a candidate URI: if MQTT does not connect within
  * this window after a cooking/config-triggered restart the candidate is
@@ -395,11 +431,34 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_CONNECTED:
         s_mqtt_connected = true;
         ESP_LOGI(TAG, "MQTT connected");
+
+        /* IoT Job completion report: if a jobId was persisted before an OTA
+         * reboot, report SUCCEEDED now that MQTT is connected and erase the key. */
+        {
+            nvs_handle_t job_nvs;
+            if (nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &job_nvs) == ESP_OK) {
+                char job_id_buf[JOB_ID_MAX_LEN];
+                size_t sz = sizeof(job_id_buf);
+                if (nvs_get_str(job_nvs, JOB_ID_NVS_KEY, job_id_buf, &sz) == ESP_OK) {
+                    char update_topic[JOBS_UPDATE_TOPIC_LEN];
+                    snprintf(update_topic, sizeof(update_topic), JOBS_UPDATE_FMT, job_id_buf);
+                    const char *succeeded = "{\"status\":\"SUCCEEDED\"}";
+                    esp_mqtt_client_publish(ev->client, update_topic, succeeded, 0, 1, 0);
+                    nvs_erase_key(job_nvs, JOB_ID_NVS_KEY);
+                    nvs_commit(job_nvs);
+                    ESP_LOGI(TAG, "Job %s: reported SUCCEEDED to AWS", job_id_buf);
+                }
+                nvs_close(job_nvs);
+            }
+        }
+
         /* Subscribe to command and OTA topics on every (re)connect — FR-09, FR-10 */
         esp_mqtt_client_subscribe(ev->client, TOPIC_CMD, 1);
         esp_mqtt_client_subscribe(ev->client, TOPIC_OTA, 1);
         esp_mqtt_client_subscribe(ev->client, TOPIC_CONFIG, 1);
-        ESP_LOGI(TAG, "MQTT subscribed: " TOPIC_CMD ", " TOPIC_OTA ", " TOPIC_CONFIG);
+        esp_mqtt_client_subscribe(ev->client, SHADOW_DELTA, 1);
+        esp_mqtt_client_subscribe(ev->client, JOBS_NOTIFY_NEXT, 1);
+        ESP_LOGI(TAG, "MQTT subscribed: " TOPIC_CMD ", " TOPIC_OTA ", " TOPIC_CONFIG ", " SHADOW_DELTA ", " JOBS_NOTIFY_NEXT);
 
         /* Candidate URI promotion: if we booted using a candidate URI and
          * MQTT is now connected, the new broker is confirmed reachable.
@@ -448,6 +507,108 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base,
             } else if (strncmp(ev->topic, TOPIC_CONFIG,
                                (size_t)ev->topic_len) == 0) {
                 handle_config_payload(ev->data, ev->data_len);
+            } else if (strncmp(ev->topic, JOBS_NOTIFY_NEXT,
+                               (size_t)ev->topic_len) == 0) {
+                /* IoT Job received: extract jobId and firmware URL, queue OTA. */
+                if (ev->data_len <= 0 || ev->data_len >= (int)JOBS_PAYLOAD_MAX_LEN) {
+                    ESP_LOGW(TAG, "Jobs: payload length %d out of range (max %u) — discarded",
+                             ev->data_len, JOBS_PAYLOAD_MAX_LEN - 1u);
+                    break;
+                }
+                char buf[JOBS_PAYLOAD_MAX_LEN];
+                memcpy(buf, ev->data, (size_t)ev->data_len);
+                buf[ev->data_len] = '\0';
+
+                cJSON *root = cJSON_Parse(buf);
+
+                if (root == NULL) {
+                    ESP_LOGW(TAG, "Jobs: JSON parse failed — discarded");
+                    break;
+                }
+
+                cJSON *execution  = cJSON_GetObjectItemCaseSensitive(root, "execution");
+                cJSON *job_id     = execution ? cJSON_GetObjectItemCaseSensitive(execution, "jobId") : NULL;
+                cJSON *job_doc    = execution ? cJSON_GetObjectItemCaseSensitive(execution, "jobDocument") : NULL;
+                cJSON *url        = job_doc   ? cJSON_GetObjectItemCaseSensitive(job_doc, "url") : NULL;
+
+                if (job_id == NULL || url == NULL ||
+                    !cJSON_IsString(job_id) || !cJSON_IsString(url) ||
+                    job_id->valuestring == NULL || url->valuestring == NULL) {
+                    ESP_LOGW(TAG, "Jobs: missing jobId or url fields — discarded");
+                    cJSON_Delete(root);
+                    break;
+                }
+
+                const char *job_id_str = job_id->valuestring;
+                const char *url_str    = url->valuestring;
+
+                /* Enforce jobId length before use — prevents topic truncation
+                 * and NVS corruption (nvs_get_str reads into JOB_ID_MAX_LEN). */
+                if (strlen(job_id_str) >= JOB_ID_MAX_LEN) {
+                    ESP_LOGW(TAG, "Jobs: jobId too long (%zu chars, max %u) — discarded",
+                             strlen(job_id_str), JOB_ID_MAX_LEN - 1u);
+                    cJSON_Delete(root);
+                    break;
+                }
+
+                /* Report IN_PROGRESS */
+                char update_topic[JOBS_UPDATE_TOPIC_LEN];
+                snprintf(update_topic, sizeof(update_topic), JOBS_UPDATE_FMT, job_id_str);
+                const char *in_progress = "{\"status\":\"IN_PROGRESS\"}";
+                esp_mqtt_client_publish(ev->client, update_topic, in_progress, 0, 1, 0);
+
+                /* Persist jobId in NVS so we can report SUCCEEDED after reboot */
+                nvs_handle_t job_nvs;
+                if (nvs_open(MQTT_URI_NVS_NAMESPACE, NVS_READWRITE, &job_nvs) == ESP_OK) {
+                    nvs_set_str(job_nvs, JOB_ID_NVS_KEY, job_id_str);
+                    nvs_commit(job_nvs);
+                    nvs_close(job_nvs);
+                    ESP_LOGI(TAG, "Job %s: jobId persisted to NVS", job_id_str);
+                }
+
+                /* Queue OTA URL */
+                int copy_len = (int)strlen(url_str);
+                copy_len = copy_len < (int)(OTA_URL_MAX_LEN - 1u) ? copy_len : (int)(OTA_URL_MAX_LEN - 1u);
+                xSemaphoreTake(s_ota_mutex, portMAX_DELAY);
+                memcpy(s_pending_ota_url, url_str, (size_t)copy_len);
+                s_pending_ota_url[copy_len] = '\0';
+                s_ota_pending = true;
+                xSemaphoreGive(s_ota_mutex);
+                ESP_LOGI(TAG, "Job %s: OTA URL queued — %s", job_id_str, url_str);
+
+                cJSON_Delete(root);
+            } else if (strncmp(ev->topic, SHADOW_DELTA,
+                               (size_t)ev->topic_len) == 0) {
+                /* Shadow delta: AWS detected a difference between desired and
+                 * reported state.  Currently handles active_profile changes. */
+                char buf[256];
+                int len = ev->data_len < (int)(sizeof(buf) - 1) ? ev->data_len : (int)(sizeof(buf) - 1);
+                memcpy(buf, ev->data, (size_t)len);
+                buf[len] = '\0';
+                cJSON *root = cJSON_Parse(buf);
+                if (root) {
+                    cJSON *state = cJSON_GetObjectItemCaseSensitive(root, "state");
+                    cJSON *profile = state
+                        ? cJSON_GetObjectItemCaseSensitive(state, "active_profile")
+                        : NULL;
+                    if (cJSON_IsNumber(profile) && profile != NULL) {
+                        int v = (int)profile->valuedouble;
+                        if (v < 0 || v > 255) {
+                            ESP_LOGW(TAG, "Shadow delta: active_profile %d out of range [0..255] — discarded", v);
+                        } else {
+                            mqtt_cmd_t cmd = {
+                                .type       = CMD_START,
+                                .profile_id = (uint8_t)v,
+                            };
+                            if (xQueueSend(s_cfg.cmd_q, &cmd, 0) != pdTRUE) {
+                                ESP_LOGW(TAG, "Shadow delta: cmd_q full — command dropped");
+                            } else {
+                                ESP_LOGI(TAG, "Shadow delta: active_profile → %d", v);
+                            }
+                        }
+                    }
+                    cJSON_Delete(root);
+                }
             }
         }
         break;
@@ -525,7 +686,21 @@ static esp_mqtt_client_handle_t mqtt_init(void) {
     s_uri_candidate_pending = load_mqtt_uri(uri, sizeof(uri));
 
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = uri,
+        .broker = {
+            .address.uri                        = uri,
+            /* AWS IoT Core mutual TLS authentication (NFR-05, FR-10):
+             * - broker.verification.certificate: Amazon Root CA — proves the broker is AWS.
+             * - credentials.authentication.certificate: device cert — proves this device is registered.
+             * - credentials.authentication.key: device private key — signs the TLS handshake.
+             * All three blobs are embedded in the firmware binary at build time (EMBED_TXTFILES). */
+            .verification.certificate           = (const char *)aws_root_ca_pem_start,
+        },
+        .credentials = {
+            .authentication.certificate         = (const char *)client_cert_pem_start,
+            .authentication.key                 = (const char *)client_key_pem_start,
+            /* Must match the iot:Connect resource in the AWS IoT policy. */
+            .client_id                          = "esp32-smart-cooking",
+        },
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
@@ -719,6 +894,22 @@ static void comms_task(void *arg) {
                      fault_name(last_state.fault));
             esp_mqtt_client_publish(mqtt_client, TOPIC_TELEMETRY, buf, 0, 1, 0);
             ESP_LOGD(TAG, "Telemetry: %s", buf);
+
+            /* Update Device Shadow reported state */
+            char shadow_buf[256];
+            snprintf(shadow_buf, sizeof(shadow_buf),
+                     "{\"state\":{\"reported\":{"
+                     "\"phase\":\"%s\","
+                     "\"temp\":%.1f,"
+                     "\"fault\":\"%s\","
+                     "\"active_profile\":%u"
+                     "}}}",
+                     state_name(last_state.state),
+                     last_state.temperature,
+                     fault_name(last_state.fault),
+                     (unsigned)last_state.active_profile);
+            esp_mqtt_client_publish(mqtt_client, SHADOW_UPDATE, shadow_buf, 0, 1, 0);
+            ESP_LOGD(TAG, "Shadow reported: %s", shadow_buf);
         }
 
 #if CONFIG_SMART_COOKING_STABILITY_TEST

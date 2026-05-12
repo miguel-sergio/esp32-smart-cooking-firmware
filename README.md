@@ -5,9 +5,9 @@
 [![Tests](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/test.yml/badge.svg)](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/test.yml)
 [![Release](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/release.yml/badge.svg)](https://github.com/miguel-sergio/esp32-smart-cooking-firmware/actions/workflows/release.yml)
 
-Production-grade ESP32 firmware for a connected smart cooking appliance. The device controls a heating element and stirrer motor, monitors temperature and humidity in real time, and is operated remotely over MQTT. Built with [ESP-IDF v6.0](https://github.com/espressif/esp-idf).
+Production-grade ESP32 firmware for a connected smart cooking appliance. The device controls a heating element and stirrer motor, monitors temperature and humidity in real time, and is operated remotely via AWS IoT Core. Built with [ESP-IDF v6.0](https://github.com/espressif/esp-idf).
 
-This project was developed as a complete embedded firmware deliverable — from hardware bring-up and driver development through state machine design, wireless connectivity, OTA updates, and a full CI pipeline.
+This project was developed as a complete embedded firmware deliverable — from hardware bring-up and driver development through state machine design, wireless connectivity, AWS IoT Core integration (mutual TLS, Device Shadow, IoT Jobs), OTA updates, and a full CI pipeline.
 
 <img src="docs/assets/system.png" width="700" alt="System overview">
 
@@ -19,7 +19,8 @@ This project was developed as a complete embedded firmware deliverable — from 
 - **Motor control** — DRV8833 dual H-bridge driver with smooth PWM ramp-up (2 s to target duty) and ramp-down (1 s to stop). Active brake on emergency stop; no abrupt starts or stops under any normal condition.
 - **MQTT connectivity** — Real-time telemetry (temperature, humidity, state, motor duty) published at 1 Hz during active cycles and 0.1 Hz at idle. Commands (`START`, `STOP`, `ESTOP`, `RESET`) received via a dedicated topic.
 - **BLE provisioning** — First-boot Wi-Fi setup via Blufi with DH key exchange + AES-256-CTR encryption. BLE stack is fully torn down once credentials are saved. If Wi-Fi connection fails after 3 consecutive attempts, the device automatically re-enters provisioning mode — no physical intervention required.
-- **OTA updates** — Firmware upgrades over HTTPS with TLS server verification triggered via MQTT. Updates are deferred until the cooking cycle is inactive; rollback activates automatically if the new firmware fails to connect.
+- **AWS IoT Core** — Device connects to AWS IoT Core over MQTT with X.509 mutual TLS (port 8883). Device Shadow keeps a persistent cloud-side state representation synchronized after every telemetry cycle — operators can query the last known device state at any time, even when the device is offline. OTA updates are delivered as IoT Jobs with full lifecycle tracking (IN_PROGRESS → SUCCEEDED/FAILED) that survives device reboots, giving operators clear visibility into every update across a fleet.
+- **OTA updates** — Firmware upgrades over HTTPS with TLS server verification, triggered via AWS IoT Jobs. Updates are deferred until the cooking cycle is inactive; rollback activates automatically if the new firmware fails to connect.
 - **Cooking profiles** — Two built-in profiles (Standard, Delicate) stored in NVS. Profile selection is remote-controllable via MQTT; parameters survive all OTA updates.
 
   | Parameter | Profile 0 — Standard | Profile 1 — Delicate |
@@ -169,21 +170,66 @@ stateDiagram-v2
     end note
 ```
 
+### Cloud connectivity (AWS IoT Core)
+
+The device connects to AWS IoT Core over MQTT with mutual TLS (X.509, port 8883). Both sides authenticate each other — the broker is verified against the Amazon Root CA embedded in firmware; the device presents its unique client certificate. Three AWS IoT services are active at runtime:
+
+**Device Shadow** maintains a persistent, cloud-side representation of the device state. After each telemetry publish, the device reports `phase`, `temp`, `fault`, and `active_profile` to its named shadow (`cooking-state`). Cloud applications — dashboards, backend services, mobile apps — can read the last known state at any time, even when the device is offline. If an operator changes a desired property through the shadow, the device receives a delta message and acts on it at next connect.
+
+**IoT Jobs** delivers OTA firmware updates as structured, trackable jobs. When a job arrives the device reports `IN_PROGRESS`, persists the Job ID to NVS, downloads the binary from S3 over HTTPS, and reboots. After the new firmware connects to AWS IoT Core it reports `SUCCEEDED` and erases the NVS entry. If the firmware crashes before connecting, the ESP-IDF rollback mechanism restores the previous partition — and the job stays `IN_PROGRESS` in the AWS console, giving the operator unambiguous visibility of the failure without any polling or guesswork.
+
+**Certificates** are never committed to source control. In the CI pipeline they are injected from GitHub Secrets at build time and compiled into the firmware binary as read-only flash regions via `EMBED_TXTFILES`. Each physical device gets its own certificate and can have its access individually revoked through AWS IoT Core policies without affecting the rest of the fleet.
+
+<img src="docs/assets/aws-iot-core.png" width="700" alt="ASW IoT telemetry">
+
+```mermaid
+flowchart LR
+    subgraph Device["ESP32"]
+        fw["comms_task<br/>mqtts:// · port 8883<br/>X.509 mutual TLS"]
+    end
+
+    subgraph AWS["AWS IoT Core"]
+        broker["MQTT Broker"]
+        shadow["Device Shadow<br/>cooking-state"]
+        jobs["IoT Jobs"]
+    end
+
+    s3["S3 Bucket<br/>(firmware binary)"]
+
+    fw <-->|"mutual TLS"| broker
+    broker <--> shadow
+    broker --> jobs
+    jobs -->|"presigned URL"| fw
+    fw -->|"HTTPS OTA download"| s3
+
+    style Device fill:#e8f4fd,stroke:#5ba3d9,color:#2d2d2d
+    style AWS fill:#fef9e7,stroke:#d4ac3a,color:#2d2d2d
+    style s3 fill:#f2f3f4,stroke:#95a5a6,color:#2d2d2d
+```
+
 ### Memory layout
 
-Custom partition table for 4 MB flash. Two OTA slots of 1.5 MB each are required to fit the BLE + Blufi stack alongside the application firmware.
+Custom partition table for 4 MB flash. Two OTA slots of 1.5625 MB each are required to fit the BLE + Blufi stack and the mbedTLS/AWS IoT Core TLS stack alongside the application firmware.
 
 | Name | Type | Offset | Size | Notes |
 |------|------|--------|------|-------|
-| `nvs` | data | 0x9000 | 24 KB | Wi-Fi credentials, cooking profiles, MQTT URI |
+| `nvs` | data | 0x9000 | 24 KB | Wi-Fi credentials, cooking profiles, MQTT URI, pending OTA Job ID |
 | `otadata` | data | 0xF000 | 8 KB | Active OTA slot selector |
 | `phy_init` | data | 0x11000 | 4 KB | RF calibration data |
-| `ota_0` | app | 0x20000 | 1.5 MB | OTA slot 0 |
-| `ota_1` | app | 0x1A0000 | 1.5 MB | OTA slot 1 |
+| `ota_0` | app | 0x20000 | 1.5625 MB | OTA slot 0 |
+| `ota_1` | app | 0x1B0000 | 1.5625 MB | OTA slot 1 |
 
 ---
 
 ## Engineering Decisions
+
+### X.509 mutual TLS for device authentication
+
+AWS IoT Core connections use X.509 client certificates rather than API keys or shared secrets. Each device presents a unique certificate; the broker is verified against the Amazon Root CA, preventing man-in-the-middle attacks. Certificates are embedded in the firmware binary at build time via ESP-IDF's `EMBED_TXTFILES` — they live in read-only flash and are never exposed in source code, logs, or CI artifacts (injected as GitHub Secrets). Individual device access can be revoked through the AWS IoT Core policy layer without touching any other device in the fleet. The tradeoff is certificate lifecycle management: rotation and revocation require a process that a simple API-key approach avoids, but the security and per-device auditability are necessary for a networked appliance in a home environment.
+
+### IoT Jobs instead of raw MQTT OTA triggers
+
+An earlier design used a plain MQTT message on `cooking/ota` to deliver the firmware URL. AWS IoT Jobs replaces this for three reasons. First, jobs have explicit status tracking — the cloud knows whether each device succeeded or failed, not just whether the MQTT message was delivered. Second, the execution lifecycle (`IN_PROGRESS` → `SUCCEEDED`/`FAILED`) survives device reboots: if the firmware crashes mid-download the job remains `IN_PROGRESS` in the AWS console, giving operators unambiguous failure visibility without polling or correlation logs. Third, jobs can be targeted at device groups, enabling staged rollouts across a fleet. The tradeoff is slightly more complex firmware logic — Job ID persistence to NVS and `SUCCEEDED` reporting on reconnect after reboot — and a dependency on the AWS IoT Jobs service.
 
 ### Bang-bang thermal control
 A simple on/off relay controller was chosen over PID for the initial prototype. It is robust, requires no tuning, and is straightforward to verify — critical properties when validating hardware for the first time. The known tradeoff is temperature overshoot around the setpoint. A PID controller is the natural next step once the hardware is characterised (see [Future Work](#future-work)).
@@ -374,7 +420,7 @@ On first boot the device enters BLE provisioning mode and advertises as `SmartCo
 
 ## MQTT Reference
 
-All payloads use JSON.
+The device connects to **AWS IoT Core** (`mqtts://`, port 8883) with X.509 mutual TLS. All application payloads use JSON. AWS IoT Core reserved topics (`$aws/things/…`) are used for Device Shadow and IoT Jobs.
 
 ### Telemetry (device → broker)
 
@@ -405,6 +451,30 @@ All payloads use JSON.
 | `cooking/config` | `{"mqtt_uri": "mqtt://new-broker.example.com:1883"}` | Migrate broker address (two-phase commit — see [Deployment](#deployment)) |
 
 Commands received in incompatible states are rejected and logged — no silent ignoring.
+
+### AWS IoT Core — Device Shadow
+
+The named shadow `cooking-state` is updated after every telemetry publish. Cloud applications can read the last known device state at any time, including when the device is offline.
+
+| Direction | Topic | Payload |
+|-----------|-------|---------|
+| Device → Cloud | `$aws/things/esp32-smart-cooking/shadow/name/cooking-state/update` | `{"state":{"reported":{"phase":"…","temp":…,"fault":"…","active_profile":…}}}` |
+| Cloud → Device | `$aws/things/esp32-smart-cooking/shadow/name/cooking-state/update/delta` | Desired-state delta pushed by cloud applications |
+
+### AWS IoT Core — IoT Jobs (OTA)
+
+OTA firmware updates are delivered as Jobs. Create a job in the AWS Console with a document containing the S3 presigned URL:
+
+```json
+{"operation": "OTA", "url": "https://s3.amazonaws.com/…/firmware.bin"}
+```
+
+| Direction | Topic | Purpose |
+|-----------|-------|---------|
+| Cloud → Device | `$aws/things/esp32-smart-cooking/jobs/notify-next` | Job delivery — device receives jobId + document |
+| Device → Cloud | `$aws/things/esp32-smart-cooking/jobs/{jobId}/update` | Status reporting: `IN_PROGRESS` on receipt, `SUCCEEDED` after reboot and reconnect |
+
+The Job ID is persisted to NVS before the OTA reboot so the `SUCCEEDED` report is sent even if the board restarts cleanly mid-cycle.
 
 ---
 
